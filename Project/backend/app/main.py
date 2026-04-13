@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.api import router as api_router
+from backend.app.mitigation import MitigationService
 from backend.app.store import EventStore
 
 
@@ -27,8 +26,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    sample_data_path = Path(__file__).resolve().parents[1] / "data" / "sample_events.json"
-    app.state.event_store = EventStore(seed_path=sample_data_path)
+    app.state.event_store = EventStore()
+    app.state.mitigation_service = MitigationService()
     app.include_router(api_router)
     return app
 

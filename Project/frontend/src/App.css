@@ -180,6 +180,115 @@ th {
   color: #6b7280;
 }
 
+.topology-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.topology-row {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+}
+
+.topology-host-row {
+  justify-content: space-around;
+}
+
+.topology-node {
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  background: #f9fafb;
+  padding: 0.45rem 0.7rem;
+  min-width: 110px;
+  text-align: center;
+}
+
+.topology-node small {
+  display: block;
+  color: #6b7280;
+  margin-top: 0.2rem;
+}
+
+.topology-switch {
+  min-width: 140px;
+  background: #dbeafe;
+  border-color: #93c5fd;
+  font-weight: 700;
+}
+
+.topology-host.active {
+  border-color: #60a5fa;
+  background: #eff6ff;
+}
+
+.topology-host.suspicious {
+  border-color: #ef4444;
+  background: #fef2f2;
+}
+
+.topology-link-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.topology-link {
+  justify-self: center;
+  width: 80%;
+  border-radius: 999px;
+  text-align: center;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.4rem;
+  background: #e5e7eb;
+  color: #6b7280;
+}
+
+.topology-link.active {
+  background: #bfdbfe;
+  color: #1d4ed8;
+}
+
+.topology-link.suspicious {
+  background: #fecaca;
+  color: #991b1b;
+}
+
+.topology-subtitle {
+  margin: 0.8rem 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.topology-pairs {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.topology-pairs li {
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #f9fafb;
+  padding: 0.4rem 0.55rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.topology-pairs li.suspicious {
+  border-color: #fca5a5;
+  background: #fef2f2;
+}
+
+.topology-pairs li small {
+  color: #4b5563;
+}
+
 @media (max-width: 900px) {
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -191,5 +300,18 @@ th {
 
   .bar-row {
     grid-template-columns: 100px 1fr 36px;
+  }
+
+  .topology-host-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .topology-link-row {
+    grid-template-columns: 1fr;
+  }
+
+  .topology-link {
+    width: 100%;
   }
 }

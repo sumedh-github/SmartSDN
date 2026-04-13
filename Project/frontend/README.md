@@ -7,6 +7,8 @@ This frontend renders a minimal IDS dashboard backed by the FastAPI service.
 - Live flow table (`/flows`)
 - Alerts panel (`/alerts`)
 - Summary cards and class distribution chart (`/stats`)
+- Static Mininet topology panel with active/suspicious host-pair highlighting
+- Empty-state UI when no live controller events have been received yet
 
 ## Configuration
 

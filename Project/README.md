@@ -21,8 +21,8 @@ Project/
 │   │   ├── main.py
 │   │   ├── api.py
 │   │   ├── schemas.py
-│   │   └── store.py
-│   └── data/sample_events.json
+│   │   ├── store.py
+│   │   └── mitigation.py
 └── frontend/
     ├── src/App.jsx
     └── package.json
@@ -82,9 +82,16 @@ ryu-manager Controller/ids_switch.py
 
 The controller:
 - behaves as a learning switch
-- polls flow stats every 5 seconds
+- polls flow stats every 2 seconds
 - performs inference per flow
-- logs detection alerts only (no blocking)
+- posts classified events to backend `POST /events`
+- remains IDS-only (no blocking by default)
+
+Optional controller backend target override:
+
+```bash
+IDS_BACKEND_EVENTS_URL=http://127.0.0.1:8000/events ryu-manager Controller/ids_switch.py
+```
 
 ## 6) Launch Mininet (OpenFlow 1.3)
 
@@ -115,6 +122,8 @@ Available endpoints:
 - `GET /flows`
 - `GET /alerts`
 - `GET /stats`
+- `POST /events`
+- `POST /mitigate` (future mitigation stub, IDS-only mode)
 
 ## 8) Start frontend dashboard (React)
 
@@ -143,12 +152,6 @@ Use separate terminals:
 - Training/runtime feature parity is enforced via `ml/artifacts/feature_schema.json`.
 - Runtime features are extracted only from flow statistics and OpenFlow match fields.
 - The controller is IDS-only by design (detection, not mitigation).
-- Backend and frontend are intentionally decoupled from Ryu internals. The current backend loads sample JSON data and is ready to receive real events later.
-
-## Future controller event emission (not required for this phase)
-
-To feed live events into the backend later, update `Controller/ids_switch.py` minimally by:
-1. Building an event payload after each successful classification (`timestamp`, flow tuple, prediction, confidence, counters).
-2. Sending that payload to a backend ingest interface (e.g., POST endpoint or local queue) in a non-blocking way.
-3. Keeping classification logic and feature schema unchanged.
+- Backend memory store starts empty and is populated only by live controller event posts.
+- Frontend consumes backend APIs only and includes empty-state handling when no live events have arrived yet.
 

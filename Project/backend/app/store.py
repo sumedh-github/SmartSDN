@@ -1,40 +1,20 @@
-"""In-memory flow event store with optional JSON bootstrap."""
+"""In-memory store for real-time classified flow events."""
 
 from __future__ import annotations
 
-import json
 from collections import Counter
-from pathlib import Path
 from threading import RLock
 
 from backend.app.schemas import FlowEvent
 
 
 class EventStore:
-    """Simple thread-safe storage for classified flow events."""
+    """Thread-safe storage for classified flow events."""
 
-    def __init__(self, seed_path: Path | None = None, max_events: int = 5000) -> None:
+    def __init__(self, max_events: int = 5000) -> None:
         self._lock = RLock()
         self._events: list[FlowEvent] = []
         self._max_events = max_events
-
-        if seed_path is not None:
-            self.load_from_json(seed_path)
-
-    def load_from_json(self, path: Path) -> None:
-        """Populate store from a JSON file if present."""
-        if not path.exists():
-            return
-
-        raw_data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(raw_data, list):
-            raise ValueError(f"Expected a JSON list in {path}")
-
-        loaded: list[FlowEvent] = [FlowEvent.model_validate(item) for item in raw_data]
-        loaded.sort(key=lambda event: event.timestamp)
-
-        with self._lock:
-            self._events = loaded[-self._max_events :]
 
     def add_event(self, event: FlowEvent) -> None:
         with self._lock:
@@ -42,13 +22,21 @@ class EventStore:
             if len(self._events) > self._max_events:
                 self._events = self._events[-self._max_events :]
 
+    def total_flows(self) -> int:
+        with self._lock:
+            return len(self._events)
+
     def list_flows(self, limit: int = 200) -> list[FlowEvent]:
         with self._lock:
             return list(reversed(self._events[-limit:]))
 
     def list_alerts(self, limit: int = 200) -> list[FlowEvent]:
         with self._lock:
-            alerts = [event for event in self._events if event.prediction != "Normal"]
+            alerts = [
+                event
+                for event in self._events
+                if event.prediction.strip().lower() != "normal"
+            ]
         return list(reversed(alerts[-limit:]))
 
     def stats(self) -> dict[str, object]:
