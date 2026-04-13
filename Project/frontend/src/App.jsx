@@ -3,6 +3,12 @@ import './App.css'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 const POLL_INTERVAL_MS = 2000
+const TOPOLOGY_HOSTS = [
+  { id: 'h1', ip: '10.0.0.1' },
+  { id: 'h2', ip: '10.0.0.2' },
+  { id: 'h3', ip: '10.0.0.3' },
+]
+const HOST_NODE_BY_IP = Object.fromEntries(TOPOLOGY_HOSTS.map((host) => [host.ip, host.id]))
 
 const fetchJson = async (path) => {
   const response = await fetch(`${API_BASE_URL}${path}`)
@@ -19,6 +25,8 @@ const formatTimestamp = (value) => {
   }
   return date.toLocaleString()
 }
+
+const isSuspiciousPrediction = (prediction) => (prediction || '').trim().toLowerCase() !== 'normal'
 
 function App() {
   const [flows, setFlows] = useState([])
@@ -75,6 +83,52 @@ function App() {
     }))
   }, [stats.class_distribution])
 
+  const topologyPairs = useMemo(() => {
+    const pairs = new Map()
+    for (const flow of flows) {
+      const srcNode = HOST_NODE_BY_IP[flow.src_ip]
+      const dstNode = HOST_NODE_BY_IP[flow.dst_ip]
+      if (!srcNode || !dstNode || srcNode === dstNode) {
+        continue
+      }
+
+      const pairKey = [srcNode, dstNode].sort().join('|')
+      const suspicious = isSuspiciousPrediction(flow.prediction)
+      const existing = pairs.get(pairKey)
+      if (!existing) {
+        pairs.set(pairKey, {
+          pairKey,
+          srcNode,
+          dstNode,
+          suspicious,
+          prediction: flow.prediction,
+        })
+        continue
+      }
+
+      if (suspicious) {
+        existing.suspicious = true
+      }
+    }
+
+    return Array.from(pairs.values())
+  }, [flows])
+
+  const hostStatus = useMemo(() => {
+    const statusMap = Object.fromEntries(TOPOLOGY_HOSTS.map((host) => [host.id, 'idle']))
+    for (const pair of topologyPairs) {
+      const status = pair.suspicious ? 'suspicious' : 'active'
+      for (const hostId of [pair.srcNode, pair.dstNode]) {
+        if (status === 'suspicious' || statusMap[hostId] === 'idle') {
+          statusMap[hostId] = status
+        }
+      }
+    }
+    return statusMap
+  }, [topologyPairs])
+
+  const hasLiveEvents = flows.length > 0
+
   return (
     <main className="dashboard">
       <header className="dashboard-header">
@@ -110,7 +164,7 @@ function App() {
         <div className="panel">
           <h2>Class Distribution</h2>
           {chartRows.length === 0 ? (
-            <p className="empty-message">No data yet.</p>
+            <p className="empty-message">No live flow events received yet.</p>
           ) : (
             <div className="bar-chart">
               {chartRows.map((item) => (
@@ -129,7 +183,9 @@ function App() {
         <div className="panel">
           <h2>Alerts (Non-Normal)</h2>
           {alerts.length === 0 ? (
-            <p className="empty-message">No suspicious flows detected.</p>
+            <p className="empty-message">
+              {hasLiveEvents ? 'No suspicious flows detected.' : 'No live flow events received yet.'}
+            </p>
           ) : (
             <ul className="alerts-list">
               {alerts.map((alert, index) => (
@@ -144,6 +200,49 @@ function App() {
             </ul>
           )}
         </div>
+      </section>
+
+      <section className="panel">
+        <h2>Topology (Mininet single,3)</h2>
+        <div className="topology-layout">
+          <div className="topology-row">
+            <div className="topology-node topology-switch">s1</div>
+          </div>
+          <div className="topology-link-row">
+            {TOPOLOGY_HOSTS.map((host) => {
+              const status = hostStatus[host.id]
+              return (
+                <div className={`topology-link ${status}`} key={`link-${host.id}`}>
+                  {status === 'suspicious' ? 'suspicious' : status === 'active' ? 'active' : 'idle'}
+                </div>
+              )
+            })}
+          </div>
+          <div className="topology-row topology-host-row">
+            {TOPOLOGY_HOSTS.map((host) => (
+              <div className={`topology-node topology-host ${hostStatus[host.id]}`} key={host.id}>
+                <strong>{host.id}</strong>
+                <small>{host.ip}</small>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <h3 className="topology-subtitle">Active communication pairs</h3>
+        {topologyPairs.length === 0 ? (
+          <p className="empty-message">No live flow events received yet.</p>
+        ) : (
+          <ul className="topology-pairs">
+            {topologyPairs.map((pair) => (
+              <li key={pair.pairKey} className={pair.suspicious ? 'suspicious' : 'normal'}>
+                <span>
+                  {pair.srcNode} ↔ {pair.dstNode}
+                </span>
+                <small>{pair.suspicious ? 'Suspicious activity' : pair.prediction}</small>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section className="panel">
@@ -181,7 +280,7 @@ function App() {
               ))}
             </tbody>
           </table>
-          {flows.length === 0 && <p className="empty-message">No flow records available.</p>}
+          {flows.length === 0 && <p className="empty-message">No live flow events received yet.</p>}
         </div>
       </section>
     </main>

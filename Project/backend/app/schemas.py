@@ -18,6 +18,8 @@ class FlowEvent(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     packet_count: int = Field(ge=0)
     byte_count: int = Field(ge=0)
+    direction: str | None = None
+    flow_key: str | None = None
 
 
 class HealthResponse(BaseModel):
@@ -30,3 +32,22 @@ class StatsResponse(BaseModel):
     suspicious_flows: int
     active_hosts: int
     class_distribution: dict[str, int]
+
+
+class EventIngestResponse(BaseModel):
+    status: str
+    total_flows: int
+
+
+class MitigationRequest(BaseModel):
+    flow_key: str | None = None
+    src_ip: str | None = None
+    dst_ip: str | None = None
+    action: str = "block"
+    reason: str | None = None
+
+
+class MitigationResponse(BaseModel):
+    status: str
+    mode: str
+    message: str

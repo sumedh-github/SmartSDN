@@ -7,8 +7,11 @@ import eventlet
 eventlet.monkey_patch()
 
 import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Tuple
+from urllib import error, request
 
 import joblib
 import numpy as np
@@ -40,6 +43,8 @@ class IntelligentIDSSwitch(app_manager.RyuApp):
 
     FLOW_IDLE_TIMEOUT = 5
     FLOW_HARD_TIMEOUT = 20
+    BACKEND_EVENTS_URL = "http://127.0.0.1:8000/events"
+    BACKEND_EMIT_TIMEOUT_SEC = 0.4
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -48,6 +53,10 @@ class IntelligentIDSSwitch(app_manager.RyuApp):
         self.last_predictions: Dict[str, Tuple[str, float]] = {}
         self.last_counters: Dict[str, Tuple[int, int]] = {}
         self.poll_interval_sec = self.POLL_INTERVAL_SEC
+        self.backend_events_url = os.getenv("IDS_BACKEND_EVENTS_URL", self.BACKEND_EVENTS_URL)
+        self.backend_emit_timeout_sec = float(
+            os.getenv("IDS_BACKEND_EMIT_TIMEOUT_SEC", str(self.BACKEND_EMIT_TIMEOUT_SEC))
+        )
         self.ids = self._load_artifacts()
         self.monitor_thread = hub.spawn(self._monitor)
 
@@ -91,6 +100,7 @@ class IntelligentIDSSwitch(app_manager.RyuApp):
         self.logger.info("Model path: %s", model_path)
         self.logger.info("Feature columns: %s", FEATURE_COLUMNS)
         self.logger.info("Poll interval: %s seconds", self.poll_interval_sec)
+        self.logger.info("Controller event endpoint: %s", self.backend_events_url)
         self.logger.info(
             "Flow timeouts: idle=%ss hard=%ss",
             self.FLOW_IDLE_TIMEOUT,
@@ -205,6 +215,61 @@ class IntelligentIDSSwitch(app_manager.RyuApp):
             return "UDP"
         return f"IP_PROTO_{proto}"
 
+    def _build_event_payload(
+        self,
+        *,
+        flow_key: str,
+        src_ip: str,
+        dst_ip: str,
+        src_port: int,
+        dst_port: int,
+        proto_name: str,
+        label: str,
+        confidence: float,
+        packet_count: int,
+        byte_count: int,
+    ) -> dict[str, object]:
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "src_port": int(src_port),
+            "dst_port": int(dst_port),
+            "protocol": proto_name,
+            "prediction": label,
+            "confidence": float(round(confidence, 6)),
+            "packet_count": int(packet_count),
+            "byte_count": int(byte_count),
+            "direction": f"{src_ip}->{dst_ip}",
+            "flow_key": flow_key,
+        }
+
+    def _emit_event_async(self, payload: dict[str, object]) -> None:
+        if not self.backend_events_url:
+            return
+        hub.spawn(self._post_event_to_backend, payload)
+
+    def _post_event_to_backend(self, payload: dict[str, object]) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        req = request.Request(
+            self.backend_events_url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=self.backend_emit_timeout_sec) as response:
+                if response.status >= 300:
+                    self.logger.debug(
+                        "Backend event post returned status %s for flow %s",
+                        response.status,
+                        payload.get("flow_key"),
+                    )
+        except (error.URLError, TimeoutError, ValueError) as exc:
+            self.logger.debug("Backend event post failed: %s", exc)
+        except Exception as exc:
+            self.logger.debug("Unexpected backend event emission error: %s", exc)
+
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
@@ -290,6 +355,8 @@ class IntelligentIDSSwitch(app_manager.RyuApp):
             src_port = match.get("tcp_src", match.get("udp_src", 0))
             dst_port = match.get("tcp_dst", match.get("udp_dst", 0))
             proto_name = self._proto_name(match)
+            packet_count = int(getattr(stat, "packet_count", 0))
+            byte_count = int(getattr(stat, "byte_count", 0))
 
             try:
                 label, confidence = self._infer_flow_label(stat)
@@ -342,6 +409,20 @@ class IntelligentIDSSwitch(app_manager.RyuApp):
                     label,
                     confidence,
                 )
+
+            event_payload = self._build_event_payload(
+                flow_key=flow_key,
+                src_ip=src_ip,
+                dst_ip=dst_ip,
+                src_port=src_port,
+                dst_port=dst_port,
+                proto_name=proto_name,
+                label=label,
+                confidence=confidence,
+                packet_count=packet_count,
+                byte_count=byte_count,
+            )
+            self._emit_event_async(event_payload)
 
     def _build_flow_match(self, parser, in_port, eth_src, eth_dst, ipv4_pkt, tcp_pkt, udp_pkt):
         if ipv4_pkt is not None:

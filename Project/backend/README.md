@@ -8,6 +8,10 @@ This backend provides dashboard-friendly IDS data through simple REST endpoints.
 - `GET /flows`
 - `GET /alerts`
 - `GET /stats`
+- `POST /events`
+- `POST /mitigate` (stub, IDS-only mode)
+
+The API starts with an empty in-memory store and is populated only by live controller events.
 
 ## Run
 
