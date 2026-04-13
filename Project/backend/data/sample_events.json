@@ -1,0 +1,62 @@
+[
+  {
+    "timestamp": "2026-04-13T09:00:00Z",
+    "src_ip": "10.0.0.1",
+    "dst_ip": "10.0.0.2",
+    "src_port": 51022,
+    "dst_port": 80,
+    "protocol": "TCP",
+    "prediction": "Normal",
+    "confidence": 0.982,
+    "packet_count": 34,
+    "byte_count": 15220
+  },
+  {
+    "timestamp": "2026-04-13T09:00:03Z",
+    "src_ip": "10.0.0.3",
+    "dst_ip": "10.0.0.2",
+    "src_port": 60999,
+    "dst_port": 443,
+    "protocol": "TCP",
+    "prediction": "DoS_DDoS",
+    "confidence": 0.951,
+    "packet_count": 410,
+    "byte_count": 64110
+  },
+  {
+    "timestamp": "2026-04-13T09:00:07Z",
+    "src_ip": "10.0.0.2",
+    "dst_ip": "10.0.0.4",
+    "src_port": 5050,
+    "dst_port": 5051,
+    "protocol": "UDP",
+    "prediction": "Congestion",
+    "confidence": 0.893,
+    "packet_count": 122,
+    "byte_count": 20211
+  },
+  {
+    "timestamp": "2026-04-13T09:00:11Z",
+    "src_ip": "10.0.0.5",
+    "dst_ip": "10.0.0.1",
+    "src_port": 43210,
+    "dst_port": 22,
+    "protocol": "TCP",
+    "prediction": "Other_Attack",
+    "confidence": 0.917,
+    "packet_count": 95,
+    "byte_count": 10102
+  },
+  {
+    "timestamp": "2026-04-13T09:00:14Z",
+    "src_ip": "10.0.0.2",
+    "dst_ip": "10.0.0.3",
+    "src_port": 5353,
+    "dst_port": 5353,
+    "protocol": "UDP",
+    "prediction": "Normal",
+    "confidence": 0.973,
+    "packet_count": 28,
+    "byte_count": 3881
+  }
+]
