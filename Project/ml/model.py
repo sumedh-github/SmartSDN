@@ -39,7 +39,6 @@ class NumericalFeatureTokenizer(nn.Module):
         nn.init.zeros_(self.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: [batch, num_features]
         if x.ndim != 2 or x.size(1) != self.num_features:
             raise ValueError(
                 f"Expected input shape [batch, {self.num_features}], got {tuple(x.shape)}"
@@ -80,16 +79,30 @@ class FTTransformer(nn.Module):
         encoded = self.encoder(x_seq)
         cls_repr = encoded[:, 0]
         logits = self.classifier(cls_repr)
+
         if return_proba:
             return torch.softmax(logits, dim=-1)
         return logits
 
     @staticmethod
-    def from_checkpoint(checkpoint: Dict[str, object], map_location: str | torch.device = "cpu") -> "FTTransformer":
+    def from_checkpoint(
+        checkpoint: Dict[str, object],
+        map_location: str | torch.device = "cpu",
+    ) -> "FTTransformer":
+        if not isinstance(checkpoint, dict):
+            raise TypeError(
+                f"Expected checkpoint to be a dict, got {type(checkpoint).__name__}."
+            )
+
+        if "model_config" not in checkpoint:
+            raise KeyError("Checkpoint missing 'model_config'.")
+
+        if "state_dict" not in checkpoint:
+            raise KeyError("Checkpoint missing 'state_dict'.")
+
         cfg = FTTransformerConfig(**checkpoint["model_config"])
         model = FTTransformer(cfg)
         model.load_state_dict(checkpoint["state_dict"])
         model.to(map_location)
         model.eval()
         return model
-

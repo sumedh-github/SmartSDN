@@ -1,0 +1,22 @@
+{
+  "feature_columns": [
+    "packet_count",
+    "byte_count",
+    "duration_sec",
+    "packets_per_second",
+    "bytes_per_second",
+    "avg_bytes_per_packet",
+    "src_port",
+    "dst_port",
+    "protocol",
+    "port_gap"
+  ],
+  "num_features": 10,
+  "classes": [
+    "Normal",
+    "Congestion",
+    "DoS_DDoS",
+    "Other_Attack"
+  ],
+  "notes": "Training and runtime inference must use this exact feature order."
+}

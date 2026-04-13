@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-from dataclasses import asdict
 from pathlib import Path
 from typing import Tuple
 
@@ -57,7 +56,10 @@ def parse_args() -> argparse.Namespace:
 def load_prepared_data(path: Path) -> pd.DataFrame:
     if not path.exists():
         LOGGER.info("Prepared dataset not found. Running preprocessing first.")
-        preprocess_output, _, _ = preprocess(input_csv=Path(path).with_name("InSDN-2022.csv"), output_csv=path)
+        preprocess_output, _, _ = preprocess(
+            input_csv=Path(path).with_name("InSDN-2022.csv"),
+            output_csv=path,
+        )
         return preprocess_output
     return pd.read_csv(path)
 
@@ -91,7 +93,12 @@ def build_train_test_tensors(df: pd.DataFrame) -> Tuple[TensorDataset, TensorDat
     return train_ds, test_ds
 
 
-def evaluate_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, device: torch.device) -> Tuple[float, float]:
+def evaluate_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+) -> Tuple[float, float]:
     model.eval()
     total_loss = 0.0
     total_correct = 0
@@ -103,6 +110,7 @@ def evaluate_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, d
             logits = model(xb)
             loss = criterion(logits, yb)
             preds = torch.argmax(logits, dim=1)
+
             total_loss += loss.item() * xb.size(0)
             total_correct += (preds == yb).sum().item()
             total_samples += xb.size(0)
@@ -110,6 +118,32 @@ def evaluate_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, d
     avg_loss = total_loss / max(total_samples, 1)
     accuracy = total_correct / max(total_samples, 1)
     return avg_loss, accuracy
+
+
+def build_checkpoint(
+    cfg: FTTransformerConfig,
+    state_dict: dict,
+    encoder,
+) -> dict:
+    clean_config = {
+        "num_features": int(cfg.num_features),
+        "num_classes": int(cfg.num_classes),
+        "d_token": int(cfg.d_token),
+        "n_heads": int(cfg.n_heads),
+        "n_layers": int(cfg.n_layers),
+        "ffn_dim": int(cfg.ffn_dim),
+        "dropout": float(cfg.dropout),
+        "head_hidden_dim": int(cfg.head_hidden_dim),
+    }
+
+    cpu_state_dict = {k: v.detach().cpu() for k, v in state_dict.items()}
+
+    return {
+        "model_config": clean_config,
+        "state_dict": cpu_state_dict,
+        "feature_columns": [str(col) for col in FEATURE_COLUMNS],
+        "classes": [str(cls_name) for cls_name in encoder.classes_],
+    }
 
 
 def train(args: argparse.Namespace) -> None:
@@ -125,6 +159,7 @@ def train(args: argparse.Namespace) -> None:
 
     encoder = joblib.load(ENCODER_PATH)
     num_classes = len(encoder.classes_)
+
     cfg = FTTransformerConfig(
         num_features=len(FEATURE_COLUMNS),
         num_classes=num_classes,
@@ -134,6 +169,7 @@ def train(args: argparse.Namespace) -> None:
         ffn_dim=args.ffn_dim,
         dropout=args.dropout,
     )
+
     model = FTTransformer(cfg).to(device)
 
     criterion = nn.CrossEntropyLoss()
@@ -154,6 +190,7 @@ def train(args: argparse.Namespace) -> None:
 
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
+
             optimizer.zero_grad()
             logits = model(xb)
             loss = criterion(logits, yb)
@@ -181,14 +218,11 @@ def train(args: argparse.Namespace) -> None:
 
         if val_acc > best_acc:
             best_acc = val_acc
-            best_state = {k: v.cpu() for k, v in model.state_dict().items()}
+            best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
 
-    checkpoint = {
-        "model_config": asdict(cfg),
-        "state_dict": best_state if best_state is not None else model.state_dict(),
-        "feature_columns": FEATURE_COLUMNS,
-        "classes": list(encoder.classes_),
-    }
+    final_state = best_state if best_state is not None else model.state_dict()
+    checkpoint = build_checkpoint(cfg, final_state, encoder)
+
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     torch.save(checkpoint, MODEL_PATH)
     LOGGER.info("Saved best model to %s (best_val_acc=%.4f)", MODEL_PATH, best_acc)
@@ -197,4 +231,3 @@ def train(args: argparse.Namespace) -> None:
 if __name__ == "__main__":
     setup_logging()
     train(parse_args())
-

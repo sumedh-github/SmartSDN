@@ -45,6 +45,31 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def load_checkpoint(model_path: Path) -> dict:
+    """
+    Load a trusted training checkpoint.
+
+    PyTorch 2.6+ defaults torch.load(..., weights_only=True), which can fail
+    for older checkpoints containing non-tensor Python / NumPy objects.
+    Since this checkpoint is locally created by this project, we explicitly
+    allow full checkpoint loading.
+    """
+    checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+
+    if not isinstance(checkpoint, dict):
+        raise TypeError(
+            f"Expected checkpoint to be a dict, but got {type(checkpoint).__name__}."
+        )
+
+    if "model_config" not in checkpoint or "state_dict" not in checkpoint:
+        raise KeyError(
+            "Checkpoint must contain 'model_config' and 'state_dict'. "
+            "Re-train the model if the checkpoint format is outdated."
+        )
+
+    return checkpoint
+
+
 def main(args: argparse.Namespace) -> None:
     df = pd.read_csv(args.prepared_csv)
     encoder = joblib.load(ENCODER_PATH)
@@ -65,7 +90,7 @@ def main(args: argparse.Namespace) -> None:
         stratify=y,
     )
 
-    checkpoint = torch.load(args.model_path, map_location="cpu")
+    checkpoint = load_checkpoint(args.model_path)
     model = FTTransformer.from_checkpoint(checkpoint, map_location="cpu")
 
     with torch.no_grad():
@@ -106,4 +131,3 @@ def main(args: argparse.Namespace) -> None:
 if __name__ == "__main__":
     setup_logging()
     main(parse_args())
-

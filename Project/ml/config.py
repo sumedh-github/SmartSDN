@@ -33,7 +33,7 @@ FEATURE_COLUMNS = [
     "src_port",
     "dst_port",
     "protocol",
-    "packet_byte_ratio",
+    "port_gap",
 ]
 
 LABEL_COLUMN = "label_4class"
