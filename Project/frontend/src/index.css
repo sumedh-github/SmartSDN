@@ -12,12 +12,12 @@ body {
     'Open Sans',
     'Helvetica Neue',
     sans-serif;
-  background: #f3f4f6;
-  color: #111827;
+  background: radial-gradient(circle at top, #0b1220, #020617 50%, #030712);
+  color: #e2e8f0;
 }
 
 #root {
-  width: min(1200px, 100%);
+  width: min(1400px, 100%);
   margin: 0 auto;
   min-height: 100vh;
   box-sizing: border-box;

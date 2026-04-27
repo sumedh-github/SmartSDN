@@ -44,7 +44,9 @@ class IntelligentIDSSwitch(app_manager.RyuApp):
     FLOW_IDLE_TIMEOUT = 5
     FLOW_HARD_TIMEOUT = 20
     BACKEND_EVENTS_URL = "http://127.0.0.1:8000/events"
+    BACKEND_CONTROLLER_STATUS_URL = "http://127.0.0.1:8000/controller/status"
     BACKEND_EMIT_TIMEOUT_SEC = 0.4
+    CONTROLLER_STATUS_INTERVAL_SEC = 3
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -54,11 +56,16 @@ class IntelligentIDSSwitch(app_manager.RyuApp):
         self.last_counters: Dict[str, Tuple[int, int]] = {}
         self.poll_interval_sec = self.POLL_INTERVAL_SEC
         self.backend_events_url = os.getenv("IDS_BACKEND_EVENTS_URL", self.BACKEND_EVENTS_URL)
+        self.backend_controller_status_url = os.getenv(
+            "IDS_BACKEND_CONTROLLER_STATUS_URL",
+            self.BACKEND_CONTROLLER_STATUS_URL,
+        )
         self.backend_emit_timeout_sec = float(
             os.getenv("IDS_BACKEND_EMIT_TIMEOUT_SEC", str(self.BACKEND_EMIT_TIMEOUT_SEC))
         )
         self.ids = self._load_artifacts()
         self.monitor_thread = hub.spawn(self._monitor)
+        self.controller_status_thread = hub.spawn(self._controller_status_monitor)
 
     def _load_artifacts(self) -> Dict[str, object]:
         project_root = Path(__file__).resolve().parents[1]
@@ -101,6 +108,7 @@ class IntelligentIDSSwitch(app_manager.RyuApp):
         self.logger.info("Feature columns: %s", FEATURE_COLUMNS)
         self.logger.info("Poll interval: %s seconds", self.poll_interval_sec)
         self.logger.info("Controller event endpoint: %s", self.backend_events_url)
+        self.logger.info("Controller status endpoint: %s", self.backend_controller_status_url)
         self.logger.info(
             "Flow timeouts: idle=%ss hard=%ss",
             self.FLOW_IDLE_TIMEOUT,
@@ -219,6 +227,8 @@ class IntelligentIDSSwitch(app_manager.RyuApp):
         self,
         *,
         flow_key: str,
+        switch_id: str,
+        datapath_id: str,
         src_ip: str,
         dst_ip: str,
         src_port: int,
@@ -242,12 +252,22 @@ class IntelligentIDSSwitch(app_manager.RyuApp):
             "byte_count": int(byte_count),
             "direction": f"{src_ip}->{dst_ip}",
             "flow_key": flow_key,
+            "switch_id": switch_id,
+            "datapath_id": datapath_id,
+            "event_source": "controller",
+            "classification_source": "ml",
+            "notes": "Live controller FT-Transformer inference output.",
         }
 
     def _emit_event_async(self, payload: dict[str, object]) -> None:
         if not self.backend_events_url:
             return
         hub.spawn(self._post_event_to_backend, payload)
+
+    def _emit_controller_status_async(self) -> None:
+        if not self.backend_controller_status_url:
+            return
+        hub.spawn(self._post_controller_status_to_backend)
 
     def _post_event_to_backend(self, payload: dict[str, object]) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -269,6 +289,35 @@ class IntelligentIDSSwitch(app_manager.RyuApp):
             self.logger.debug("Backend event post failed: %s", exc)
         except Exception as exc:
             self.logger.debug("Unexpected backend event emission error: %s", exc)
+
+    def _post_controller_status_to_backend(self) -> None:
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "running": True,
+            "polling_active": True,
+            "model_loaded": True,
+            "mode": "REAL_ML",
+            "datapath_count": len(self.datapaths),
+            "backend_events_url": self.backend_events_url,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        req = request.Request(
+            self.backend_controller_status_url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=self.backend_emit_timeout_sec) as response:
+                if response.status >= 300:
+                    self.logger.debug(
+                        "Controller status post returned status %s",
+                        response.status,
+                    )
+        except (error.URLError, TimeoutError, ValueError) as exc:
+            self.logger.debug("Controller status post failed: %s", exc)
+        except Exception as exc:
+            self.logger.debug("Unexpected controller status emission error: %s", exc)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -328,6 +377,11 @@ class IntelligentIDSSwitch(app_manager.RyuApp):
                 self._request_stats(dp)
             hub.sleep(self.poll_interval_sec)
 
+    def _controller_status_monitor(self):
+        while True:
+            self._emit_controller_status_async()
+            hub.sleep(self.CONTROLLER_STATUS_INTERVAL_SEC)
+
     def _request_stats(self, datapath):
         parser = datapath.ofproto_parser
         req = parser.OFPFlowStatsRequest(datapath)
@@ -336,6 +390,8 @@ class IntelligentIDSSwitch(app_manager.RyuApp):
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
         body = ev.msg.body
+        datapath_id = f"{ev.msg.datapath.id:016x}"
+        switch_id = f"s{ev.msg.datapath.id}"
 
         for stat in body:
             if stat.priority == 0:
@@ -412,6 +468,8 @@ class IntelligentIDSSwitch(app_manager.RyuApp):
 
             event_payload = self._build_event_payload(
                 flow_key=flow_key,
+                switch_id=switch_id,
+                datapath_id=datapath_id,
                 src_ip=src_ip,
                 dst_ip=dst_ip,
                 src_port=src_port,
