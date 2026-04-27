@@ -1,9 +1,11 @@
-# Intelligent SDN Controller with FT-Transformer IDS
+# Intelligent SDN Cyber/SOC Platform with FT-Transformer IDS
 
-This project implements real-time SDN traffic classification using:
+This project implements a live SDN cyber/SOC-style security monitoring prototype using:
 - **Ryu controller** (OpenFlow 1.3)
 - **Mininet** network emulation
 - **FT-Transformer** (PyTorch) for multi-class IDS inference
+- **FastAPI backend** for live SOC APIs
+- **React frontend** with login gate, dynamic topology graph, scenario controls, and mitigation controls
 
 ## Project structure
 
@@ -21,10 +23,13 @@ Project/
 │   │   ├── main.py
 │   │   ├── api.py
 │   │   ├── schemas.py
+│   │   ├── mode.py
+│   │   ├── scenario.py
 │   │   ├── store.py
 │   │   └── mitigation.py
 └── frontend/
     ├── src/App.jsx
+    ├── src/LoginGate.jsx
     └── package.json
 ```
 
@@ -85,12 +90,19 @@ The controller:
 - polls flow stats every 2 seconds
 - performs inference per flow
 - posts classified events to backend `POST /events`
-- remains IDS-only (no blocking by default)
+- posts controller health to backend `POST /controller/status`
+- remains IDS-only for forwarding behavior (mitigation is managed in backend/UI control plane)
 
 Optional controller backend target override:
 
 ```bash
 IDS_BACKEND_EVENTS_URL=http://127.0.0.1:8000/events ryu-manager Controller/ids_switch.py
+```
+
+Optional status endpoint override:
+
+```bash
+IDS_BACKEND_CONTROLLER_STATUS_URL=http://127.0.0.1:8000/controller/status ryu-manager Controller/ids_switch.py
 ```
 
 ## 6) Launch Mininet (OpenFlow 1.3)
@@ -119,11 +131,23 @@ python3 -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
 
 Available endpoints:
 - `GET /health`
+- `GET /mode`
+- `PUT /mode`
+- `GET /controller/status`
+- `POST /controller/status`
 - `GET /flows`
 - `GET /alerts`
+- `GET /sessions`
+- `GET /topology`
 - `GET /stats`
+- `GET /scenarios`
+- `POST /scenarios/run`
+- `POST /scenarios/clear`
+- `GET /mitigation/config`
+- `PUT /mitigation/config`
+- `GET /mitigation/events`
 - `POST /events`
-- `POST /mitigate` (future mitigation stub, IDS-only mode)
+- `POST /mitigate`
 
 ## 8) Start frontend dashboard (React)
 
@@ -147,11 +171,28 @@ Use separate terminals:
 4. `sudo mn --topo single,3 --mac --switch ovsk,protocols=OpenFlow13 --controller remote`
 5. Generate traffic (`pingall`, `iperf`) and view dashboard at the Vite URL (default `http://localhost:5173`)
 
+### UI flow
+1. Open frontend URL and sign in via the UI login gate.
+2. Start in **REAL ML MODE** to show live controller inference labels (`classification_source=ml`).
+3. Switch to **DEMO / SCENARIO MODE** to run controlled scenarios:
+   - Normal TCP
+   - Normal UDP
+   - Congestion
+   - DoS/DDoS
+   - Other Attack
+4. Use **Clear / Reset Demo State** to remove scenario-generated events.
+5. Demonstrate mitigation from:
+   - alerts panel
+   - session/conversation cards
+   - manual mitigation panel
+6. Enable optional automatic mitigation in mitigation config (disabled by default).
+
 ## Notes
 
 - Training/runtime feature parity is enforced via `ml/artifacts/feature_schema.json`.
 - Runtime features are extracted only from flow statistics and OpenFlow match fields.
-- The controller is IDS-only by design (detection, not mitigation).
-- Backend memory store starts empty and is populated only by live controller event posts.
-- Frontend consumes backend APIs only and includes empty-state handling when no live events have arrived yet.
+- Real ML controller inference is never silently faked.
+- Demo/scenario events are explicitly labeled (`classification_source=demo|hybrid`, `mode=DEMO_SCENARIO`).
+- Backend store is in-memory only (live events; no persistent history).
+- Mitigation is explainable and tracked via live mitigation event logs, isolated from forwarding logic.
 

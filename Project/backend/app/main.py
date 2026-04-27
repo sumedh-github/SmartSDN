@@ -7,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.api import router as api_router
 from backend.app.mitigation import MitigationService
+from backend.app.mode import ModeService
+from backend.app.scenario import ScenarioService
 from backend.app.store import EventStore
 
 
@@ -27,7 +29,12 @@ def create_app() -> FastAPI:
     )
 
     app.state.event_store = EventStore()
+    app.state.mode_service = ModeService()
     app.state.mitigation_service = MitigationService()
+    app.state.scenario_service = ScenarioService(
+        store=app.state.event_store,
+        mode_service=app.state.mode_service,
+    )
     app.include_router(api_router)
     return app
 

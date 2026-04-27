@@ -1,14 +1,27 @@
 # IDS Frontend (React + Vite)
 
-This frontend renders a minimal IDS dashboard backed by the FastAPI service.
+This frontend renders a modern SOC-style SDN security dashboard backed by the FastAPI service.
 
 ## Features
 
-- Live flow table (`/flows`)
-- Alerts panel (`/alerts`)
-- Summary cards and class distribution chart (`/stats`)
-- Static Mininet topology panel with active/suspicious host-pair highlighting
-- Empty-state UI when no live controller events have been received yet
+- Modern UI login gate (demo/local UI-only access)
+- SOC dashboard theme with health/status cards
+- Dynamic topology graph from backend/controller data (`/topology`)
+- Live controller visibility panel (`/controller/status`)
+- Explicit mode indicator and switch:
+  - REAL ML MODE
+  - DEMO / SCENARIO MODE
+- Scenario runner controls (`/scenarios`, `/scenarios/run`, `/scenarios/clear`)
+- Raw directional live flow table (`/flows`)
+- Grouped session/conversation cards (`/sessions`)
+- Mitigation panel:
+  - Manual actions (`/mitigate`)
+  - Automatic mitigation configuration (`/mitigation/config`)
+  - Mitigation event log (`/mitigation/events`)
+- Label source visibility on events and sessions:
+  - ML
+  - Demo
+  - Hybrid
 
 ## Configuration
 
@@ -26,3 +39,9 @@ If omitted, the app defaults to `http://localhost:8000`.
 npm install
 npm run dev
 ```
+
+## Notes
+
+- No historical persistence is used; all dashboard state is live and in-memory.
+- Demo/scenario controls are available only when DEMO / SCENARIO MODE is active.
+- REAL ML MODE uses live controller FT-Transformer labels only.
