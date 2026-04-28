@@ -5,7 +5,9 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.app.auth import AuthService
 from backend.app.api import router as api_router
+from backend.app.enforcement import EnforcementService
 from backend.app.mitigation import MitigationService
 from backend.app.mode import ModeService
 from backend.app.scenario import ScenarioService
@@ -31,6 +33,8 @@ def create_app() -> FastAPI:
     app.state.event_store = EventStore()
     app.state.mode_service = ModeService()
     app.state.mitigation_service = MitigationService()
+    app.state.auth_service = AuthService()
+    app.state.enforcement_service = EnforcementService()
     app.state.scenario_service = ScenarioService(
         store=app.state.event_store,
         mode_service=app.state.mode_service,

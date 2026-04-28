@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 from uuid import uuid4
@@ -23,6 +24,7 @@ class MitigationService:
         self._lock = RLock()
         self._requests: list[MitigationRequest] = []
         self._config = AutoMitigationConfig()
+        self._automatic_hit_counter: dict[str, int] = defaultdict(int)
 
     def config(self) -> AutoMitigationConfig:
         with self._lock:
@@ -35,11 +37,12 @@ class MitigationService:
             return self._config.model_copy()
 
     def register_request(self, request: MitigationRequest) -> MitigationEvent:
+        normalized = self._normalize_request(request)
         with self._lock:
-            self._requests.append(request)
+            self._requests.append(normalized)
             now = datetime.now(timezone.utc)
-            timeout_sec = request.timeout_sec
-            if timeout_sec is None and request.triggered_by == "automatic":
+            timeout_sec = normalized.timeout_sec
+            if timeout_sec is None and normalized.triggered_by == "automatic":
                 timeout_sec = self._config.default_timeout_sec
             expires_at = None
             if timeout_sec and timeout_sec > 0:
@@ -48,15 +51,20 @@ class MitigationService:
             return MitigationEvent(
                 mitigation_id=str(uuid4()),
                 timestamp=now,
-                action=request.action,
-                triggered_by=request.triggered_by,
-                reason=request.reason or "No reason provided.",
+                action=normalized.action,
+                target_type=self._target_type_for_action(normalized.action),
+                triggered_by=normalized.triggered_by,
+                reason=normalized.reason or "No reason provided.",
                 status="active",
-                flow_key=request.flow_key,
-                src_ip=request.src_ip,
-                dst_ip=request.dst_ip,
-                switch_id=request.switch_id,
-                port_id=request.port_id,
+                flow_key=normalized.flow_key,
+                src_ip=normalized.src_ip,
+                dst_ip=normalized.dst_ip,
+                protocol=normalized.protocol,
+                switch_id=normalized.switch_id,
+                port_id=normalized.port_id,
+                target_summary=self._target_summary(normalized),
+                threshold=normalized.threshold,
+                condition=normalized.condition,
                 expires_at=expires_at,
             )
 
@@ -75,14 +83,62 @@ class MitigationService:
     def auto_mitigation_request(self, event: FlowEvent) -> MitigationRequest:
         with self._lock:
             config = self._config.model_copy()
+            hit_key = f"{event.src_ip}|{event.dst_ip}|{event.protocol.upper()}"
+            self._automatic_hit_counter[hit_key] += 1
+            hit_count = self._automatic_hit_counter[hit_key]
+
         action = config.action_order[0] if config.action_order else "block_flow"
+        if hit_count >= config.escalate_after_count and len(config.action_order) > 1:
+            action = config.action_order[1]
+
         return MitigationRequest(
             flow_key=event.flow_key,
             src_ip=event.src_ip,
             dst_ip=event.dst_ip,
+            protocol=event.protocol.upper(),
             switch_id=event.switch_id,
             action=action,
-            reason=f"Automatic mitigation for {event.prediction} (conf={event.confidence:.3f})",
+            reason=(
+                f"Automatic mitigation for {event.prediction} (conf={event.confidence:.3f}, "
+                f"hit_count={hit_count})."
+            ),
+            threshold=(
+                f"label in {config.suspicious_labels} and confidence >= {config.min_confidence} "
+                f"(escalate_after_count={config.escalate_after_count})"
+            ),
+            condition=f"label={event.prediction}, confidence={event.confidence:.3f}, hit_count={hit_count}",
             timeout_sec=config.default_timeout_sec,
             triggered_by="automatic",
         )
+
+    def _normalize_request(self, request: MitigationRequest) -> MitigationRequest:
+        normalized_protocol = request.protocol.upper().strip() if request.protocol else None
+        normalized = request.model_copy(update={"protocol": normalized_protocol})
+        if normalized.action == "block_flow":
+            if not normalized.src_ip or not normalized.dst_ip or not normalized.protocol:
+                raise ValueError("Block Flow Pair requires src_ip, dst_ip, and protocol.")
+            if normalized.protocol not in {"TCP", "UDP"}:
+                raise ValueError("Block Flow Pair protocol must be TCP or UDP.")
+        elif normalized.action == "block_source":
+            if not normalized.src_ip:
+                raise ValueError("Block Source Host requires src_ip.")
+        elif normalized.action == "isolate_port":
+            if normalized.port_id is None:
+                raise ValueError("Disable/Isolate Port requires port_id.")
+            if not normalized.switch_id:
+                normalized = normalized.model_copy(update={"switch_id": "s1"})
+        return normalized
+
+    def _target_type_for_action(self, action: str) -> str:
+        if action == "block_flow":
+            return "flow_pair"
+        if action == "block_source":
+            return "source_host"
+        return "port"
+
+    def _target_summary(self, request: MitigationRequest) -> str:
+        if request.action == "block_flow":
+            return f"flow_pair:{request.src_ip}->{request.dst_ip}:{request.protocol}"
+        if request.action == "block_source":
+            return f"source_host:{request.src_ip}"
+        return f"port:{request.switch_id or 's1'}:{request.port_id}"

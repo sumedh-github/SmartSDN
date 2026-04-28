@@ -94,6 +94,8 @@ class EventStore:
                 self._mitigation_events = self._mitigation_events[-self._max_mitigation_events :]
             if mitigation_event.status == "active":
                 self._active_mitigations[mitigation_event.mitigation_id] = mitigation_event
+            elif mitigation_event.status in {"retracted", "failed", "expired"}:
+                self._active_mitigations.pop(mitigation_event.mitigation_id, None)
             self._cleanup_expired_mitigations_locked()
             self._apply_mitigation_to_existing_events_locked(mitigation_event)
 
@@ -101,6 +103,31 @@ class EventStore:
         with self._lock:
             self._cleanup_expired_mitigations_locked()
             return list(reversed(self._mitigation_events[-limit:]))
+
+    def list_active_mitigations(self) -> list[MitigationEvent]:
+        with self._lock:
+            self._cleanup_expired_mitigations_locked()
+            return list(reversed(list(self._active_mitigations.values())))
+
+    def get_mitigation(self, mitigation_id: str) -> MitigationEvent | None:
+        with self._lock:
+            for event in reversed(self._mitigation_events):
+                if event.mitigation_id == mitigation_id:
+                    return event
+        return None
+
+    def update_mitigation(self, mitigation_event: MitigationEvent) -> MitigationEvent:
+        with self._lock:
+            for index, existing in enumerate(self._mitigation_events):
+                if existing.mitigation_id == mitigation_event.mitigation_id:
+                    self._mitigation_events[index] = mitigation_event
+                    break
+            if mitigation_event.status == "active":
+                self._active_mitigations[mitigation_event.mitigation_id] = mitigation_event
+            else:
+                self._active_mitigations.pop(mitigation_event.mitigation_id, None)
+            self._recompute_event_mitigation_state_locked()
+            return mitigation_event
 
     def total_flows(self) -> int:
         with self._lock:
@@ -146,6 +173,8 @@ class EventStore:
             sessions.append(
                 SessionView(
                     session_id=session_id,
+                    source_entity=records[-1].src_ip,
+                    destination_entity=records[-1].dst_ip,
                     protocol=records[0].protocol,
                     endpoints=endpoints,
                     participants=endpoints,
@@ -168,6 +197,7 @@ class EventStore:
     def topology(self) -> TopologyResponse:
         with self._lock:
             events = list(self._events)
+            active_mitigations = list(self._active_mitigations.values())
         controller_status = self.controller_status()
 
         switch_ids = sorted({event.switch_id or "s1" for event in events} or {"s1"})
@@ -199,13 +229,14 @@ class EventStore:
             )
 
         host_ips = sorted({event.src_ip for event in events} | {event.dst_ip for event in events})
+        blocked_sources = {mitigation.src_ip for mitigation in active_mitigations if mitigation.action == "block_source"}
         for ip in host_ips:
             nodes.append(
                 TopologyNode(
                     id=_host_node_id(ip),
                     kind="host",
                     label=ip,
-                    status="active",
+                    status="mitigated" if ip in blocked_sources else "active",
                     metadata={"ip": ip},
                 )
             )
@@ -224,6 +255,17 @@ class EventStore:
                 )
             )
 
+        isolated_switches = {
+            mitigation.switch_id or "s1"
+            for mitigation in active_mitigations
+            if mitigation.action == "isolate_port" and mitigation.src_ip is None
+        }
+        isolated_host_pairs = {
+            ((mitigation.switch_id or "s1"), mitigation.src_ip)
+            for mitigation in active_mitigations
+            if mitigation.action == "isolate_port" and mitigation.src_ip is not None
+        }
+
         host_link_stats: dict[tuple[str, str], dict[str, int | str]] = {}
         for event in events:
             switch_id = event.switch_id or "s1"
@@ -241,7 +283,9 @@ class EventStore:
                 stats["flow_count"] = int(stats["flow_count"]) + 1
                 stats["packet_count"] = int(stats["packet_count"]) + event.packet_count
                 stats["byte_count"] = int(stats["byte_count"]) + event.byte_count
-                if event.mitigation_state == "blocked":
+                if switch_id in isolated_switches or (switch_id, ip) in isolated_host_pairs:
+                    stats["state"] = "disabled"
+                elif event.mitigation_state == "blocked":
                     stats["state"] = "blocked"
                 elif _is_suspicious(event.prediction) and stats["state"] != "blocked":
                     stats["state"] = "suspicious"
@@ -358,10 +402,12 @@ class EventStore:
         for mitigation_id in expired_ids:
             mitigation = self._active_mitigations.pop(mitigation_id)
             mitigation.status = "expired"
+        if expired_ids:
+            self._recompute_event_mitigation_state_locked()
 
     def _apply_mitigation_to_existing_events_locked(self, mitigation_event: MitigationEvent) -> None:
         for event in self._events:
-            if self._event_matches_mitigation(event, mitigation_event):
+            if mitigation_event.status == "active" and self._event_matches_mitigation(event, mitigation_event):
                 event.mitigation_state = "blocked"
 
     def _resolve_mitigation_state_locked(self, event: FlowEvent) -> str:
@@ -371,13 +417,16 @@ class EventStore:
                 return "blocked"
         return "none"
 
+    def _recompute_event_mitigation_state_locked(self) -> None:
+        for event in self._events:
+            event.mitigation_state = self._resolve_mitigation_state_locked(event)
+
     def _event_matches_mitigation(self, event: FlowEvent, mitigation: MitigationEvent) -> bool:
-        if mitigation.action == "block_flow" and mitigation.flow_key:
-            return event.flow_key == mitigation.flow_key
-        if mitigation.action == "block_flow" and not mitigation.flow_key:
+        if mitigation.action == "block_flow":
             src_match = mitigation.src_ip is None or event.src_ip == mitigation.src_ip
             dst_match = mitigation.dst_ip is None or event.dst_ip == mitigation.dst_ip
-            return src_match and dst_match
+            proto_match = mitigation.protocol is None or event.protocol.upper() == mitigation.protocol.upper()
+            return src_match and dst_match and proto_match
         if mitigation.action == "block_source" and mitigation.src_ip:
             return event.src_ip == mitigation.src_ip
         if mitigation.action == "isolate_port":

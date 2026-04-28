@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import './App.css'
 import LoginGate from './LoginGate'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 const POLL_INTERVAL_MS = 2000
+const AUTH_STORAGE_KEY = 'soc.auth.session'
 
 const MODE_META = {
   REAL_ML: { label: 'REAL ML MODE', description: 'Only live FT-Transformer controller inference is used.' },
@@ -20,30 +22,83 @@ const SOURCE_LABEL = {
 }
 
 const MITIGATION_ACTIONS = [
-  { value: 'block_flow', label: 'Block Flow' },
-  { value: 'block_source', label: 'Block Source' },
+  { value: 'block_flow', label: 'Block Flow Pair' },
+  { value: 'block_source', label: 'Block Source Host' },
   { value: 'isolate_port', label: 'Disable / Isolate Port' },
 ]
 
-const fetchJson = async (path, options = {}) => {
+const NAV_ITEMS = [
+  { to: '/dashboard/overview', label: 'Overview Dashboard' },
+  { to: '/dashboard/topology', label: 'Topology' },
+  { to: '/dashboard/raw-flows', label: 'Raw Flows' },
+  { to: '/dashboard/sessions', label: 'Sessions' },
+  { to: '/dashboard/alerts', label: 'Alerts' },
+  { to: '/dashboard/scenarios', label: 'Scenarios' },
+  { to: '/dashboard/mitigation', label: 'Mitigation' },
+  { to: '/dashboard/health', label: 'System / Controller Health' },
+  { to: '/dashboard/methodology', label: 'Methodology / About' },
+]
+
+class ApiError extends Error {
+  constructor(message, status) {
+    super(message)
+    this.status = status
+  }
+}
+
+const readStoredSession = () => {
+  try {
+    const raw = window.localStorage.getItem(AUTH_STORAGE_KEY)
+    if (!raw) {
+      return null
+    }
+    const parsed = JSON.parse(raw)
+    if (!parsed?.token || !parsed?.user) {
+      return null
+    }
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+const writeStoredSession = (session) => {
+  window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(session))
+}
+
+const clearStoredSession = () => {
+  window.localStorage.removeItem(AUTH_STORAGE_KEY)
+}
+
+const parseApiError = async (response) => {
+  let detail = `Request failed: ${response.status}`
+  try {
+    const body = await response.json()
+    if (body?.detail) {
+      detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
+    } else if (body?.message) {
+      detail = String(body.message)
+    }
+  } catch {
+    // Keep default message.
+  }
+  return new ApiError(detail, response.status)
+}
+
+const requestJson = async (path, { token, method = 'GET', body } = {}) => {
   const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
+    method,
     headers: {
       'Content-Type': 'application/json',
-      ...(options.headers || {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
+    ...(body ? { body: JSON.stringify(body) } : {}),
   })
   if (!response.ok) {
-    let detail = `Request failed: ${response.status}`
-    try {
-      const body = await response.json()
-      if (body?.detail) {
-        detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
-      }
-    } catch {
-      // Keep default error message.
-    }
-    throw new Error(detail)
+    throw await parseApiError(response)
+  }
+  if (response.status === 204) {
+    return null
   }
   return response.json()
 }
@@ -76,7 +131,730 @@ const labelSourceClass = (source) => {
   return 'source-pill source-ml'
 }
 
-function SocDashboard({ currentUser, onLogout }) {
+const statusClass = (value) => String(value || '').toLowerCase().replace(/\s+/g, '_')
+
+const mitigationPreview = (payload) => {
+  if (payload.action === 'block_flow') {
+    return [
+      'Action: Block Flow Pair',
+      `Source IP: ${payload.src_ip || 'n/a'}`,
+      `Destination IP: ${payload.dst_ip || 'n/a'}`,
+      `Protocol: ${payload.protocol || 'n/a'}`,
+    ].join('\n')
+  }
+  if (payload.action === 'block_source') {
+    return [
+      'Action: Block Source Host',
+      `Source IP: ${payload.src_ip || 'n/a'}`,
+      'Scope: all IPv4 traffic from source host (ARP not blocked)',
+    ].join('\n')
+  }
+  return [
+    'Action: Disable / Isolate Port',
+    `Switch: ${payload.switch_id || 's1'}`,
+    `Port: ${payload.port_id ?? 'n/a'}`,
+    `Source IP hint: ${payload.src_ip || 'n/a'}`,
+  ].join('\n')
+}
+
+function ProtectedRoute({ authenticated, children }) {
+  if (!authenticated) {
+    return <Navigate to="/login" replace />
+  }
+  return children
+}
+
+function OverviewSection({ stats, chartRows }) {
+  return (
+    <section className="section-stack">
+      <section className="summary-grid">
+        <article className="summary-card">
+          <h2>Total Flows</h2>
+          <strong>{stats.total_flows}</strong>
+        </article>
+        <article className="summary-card">
+          <h2>Normal Flows</h2>
+          <strong>{stats.normal_flows}</strong>
+        </article>
+        <article className="summary-card">
+          <h2>Suspicious Flows</h2>
+          <strong>{stats.suspicious_flows}</strong>
+        </article>
+        <article className="summary-card">
+          <h2>Active Hosts</h2>
+          <strong>{stats.active_hosts}</strong>
+        </article>
+        <article className="summary-card">
+          <h2>Mitigated Flows</h2>
+          <strong>{stats.mitigated_flows}</strong>
+        </article>
+      </section>
+
+      <section className="panel">
+        <h2>Class Distribution</h2>
+        {chartRows.length === 0 ? (
+          <p className="empty-message">No live flow events received yet.</p>
+        ) : (
+          <div className="bar-chart">
+            {chartRows.map((item) => (
+              <div className="bar-row" key={item.label}>
+                <span className="bar-label">{item.label}</span>
+                <div className="bar-track">
+                  <div className="bar-fill" style={{ width: `${item.percent}%` }} />
+                </div>
+                <span className="bar-value">{item.count}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    </section>
+  )
+}
+
+function TopologySection({ topology, graphLayout }) {
+  return (
+    <section className="panel topology-panel">
+      <div className="panel-title-row">
+        <h2>Backend-Driven Dynamic SDN Topology</h2>
+        <span className="muted">Generated at {topology.generated_at ? formatTimestamp(topology.generated_at) : 'n/a'}</span>
+      </div>
+      {topology.nodes.length === 0 ? (
+        <p className="empty-message">No topology nodes available yet. Waiting for live events.</p>
+      ) : (
+        <div className="graph-wrap">
+          <svg viewBox={`0 0 ${graphLayout.width} ${graphLayout.height}`} role="img" aria-label="Topology graph">
+            {topology.links.map((link) => {
+              const source = graphLayout.positions[link.source]
+              const target = graphLayout.positions[link.target]
+              if (!source || !target) {
+                return null
+              }
+              return (
+                <line
+                  key={link.id}
+                  x1={source.x}
+                  y1={source.y}
+                  x2={target.x}
+                  y2={target.y}
+                  className={`link-line ${link.state}`}
+                />
+              )
+            })}
+            {topology.traffic_edges.map((edge) => {
+              const source = graphLayout.positions[edge.source]
+              const target = graphLayout.positions[edge.target]
+              if (!source || !target) {
+                return null
+              }
+              return (
+                <line
+                  key={edge.id}
+                  x1={source.x}
+                  y1={source.y}
+                  x2={target.x}
+                  y2={target.y}
+                  className={`traffic-line ${edge.state}`}
+                />
+              )
+            })}
+            {topology.nodes.map((node) => {
+              const position = graphLayout.positions[node.id]
+              if (!position) {
+                return null
+              }
+              return (
+                <g key={node.id}>
+                  <circle
+                    cx={position.x}
+                    cy={position.y}
+                    r={node.kind === 'controller' ? 38 : node.kind === 'switch' ? 32 : 28}
+                    className={`node-circle ${node.kind} ${node.status}`}
+                  />
+                  <text x={position.x} y={position.y - 4} textAnchor="middle" className="node-title">
+                    {nodeDisplay(node)}
+                  </text>
+                  <text x={position.x} y={position.y + 12} textAnchor="middle" className="node-subtitle">
+                    {node.kind}
+                  </text>
+                </g>
+              )
+            })}
+          </svg>
+        </div>
+      )}
+      <div className="traffic-legend">
+        <span className="legend-item normal">Normal traffic</span>
+        <span className="legend-item suspicious">Suspicious traffic</span>
+        <span className="legend-item blocked">Mitigated / Blocked traffic</span>
+        <span className="legend-item disabled">Disabled link/port</span>
+        <span className="legend-item controller">Controller node</span>
+        <span className="legend-item switch">Switch node</span>
+        <span className="legend-item host">Host node</span>
+      </div>
+    </section>
+  )
+}
+
+function RawFlowsSection({ flows }) {
+  return (
+    <section className="panel">
+      <h2>Raw Directional Flows (Technical Detail)</h2>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Timestamp</th>
+              <th>Source</th>
+              <th>Destination</th>
+              <th>Protocol</th>
+              <th>Prediction</th>
+              <th>Confidence</th>
+              <th>Label Source</th>
+              <th>Mode</th>
+              <th>Mitigation</th>
+            </tr>
+          </thead>
+          <tbody>
+            {flows.map((flow, index) => (
+              <tr key={`${flow.timestamp}-${flow.src_ip}-${flow.dst_ip}-${index}`}>
+                <td>{formatTimestamp(flow.timestamp)}</td>
+                <td>
+                  {flow.src_ip}:{flow.src_port}
+                </td>
+                <td>
+                  {flow.dst_ip}:{flow.dst_port}
+                </td>
+                <td>{flow.protocol}</td>
+                <td>
+                  <span className={flow.prediction === 'Normal' ? 'tag-normal' : 'tag-alert'}>{flow.prediction}</span>
+                </td>
+                <td>{flow.confidence.toFixed(3)}</td>
+                <td>
+                  <span className={labelSourceClass(flow.classification_source)}>
+                    {SOURCE_LABEL[flow.classification_source] || 'ML'}
+                  </span>
+                </td>
+                <td>{flow.mode}</td>
+                <td>{flow.mitigation_state || 'none'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {flows.length === 0 && <p className="empty-message">No live flow events received yet.</p>}
+      </div>
+    </section>
+  )
+}
+
+function SessionsSection({ sessions, onAction, actionBusy }) {
+  return (
+    <section className="panel">
+      <h2>Grouped Sessions / Conversations (Primary Operator View)</h2>
+      {sessions.length === 0 ? (
+        <p className="empty-message">No live sessions available yet.</p>
+      ) : (
+        <div className="session-grid">
+          {sessions.map((session) => (
+            <article key={session.session_id} className={`session-card ${session.suspicious ? 'suspicious' : 'normal'}`}>
+              <div className="session-top">
+                <strong>{session.endpoints.join(' ↔ ')}</strong>
+                <span className={labelSourceClass(session.dominant_label_source)}>
+                  {SOURCE_LABEL[session.dominant_label_source] || 'ML'}
+                </span>
+              </div>
+              <p>
+                <span className={session.suspicious ? 'tag-alert' : 'tag-normal'}>{session.dominant_label}</span>{' '}
+                protocol={session.protocol}
+              </p>
+              <p className="muted">
+                flows={session.flow_count} | confidence avg={session.confidence_avg.toFixed(3)} max=
+                {session.confidence_max.toFixed(3)}
+              </p>
+              <p className="muted">
+                traffic={session.source_entity} → {session.destination_entity} | mitigation={session.mitigation_state}
+              </p>
+              <div className="inline-actions">
+                <button
+                  className="btn tiny danger"
+                  type="button"
+                  disabled={actionBusy}
+                  onClick={() => onAction(session, 'block_flow')}
+                >
+                  Block Flow Pair
+                </button>
+                <button
+                  className="btn tiny danger"
+                  type="button"
+                  disabled={actionBusy}
+                  onClick={() => onAction(session, 'block_source')}
+                >
+                  Block Source Host
+                </button>
+                <button
+                  className="btn tiny"
+                  type="button"
+                  disabled={actionBusy}
+                  onClick={() => onAction(session, 'isolate_port')}
+                >
+                  Disable / Isolate Port
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function AlertsSection({ alerts, hasLiveEvents, onAction, actionBusy }) {
+  return (
+    <section className="panel">
+      <h2>Alerts (Suspicious Live Flows)</h2>
+      {alerts.length === 0 ? (
+        <p className="empty-message">
+          {hasLiveEvents ? 'No suspicious flows detected.' : 'No live flow events received yet.'}
+        </p>
+      ) : (
+        <ul className="alerts-list">
+          {alerts.map((alert, index) => (
+            <li key={`${alert.timestamp}-${alert.src_ip}-${index}`}>
+              <div className="alert-header">
+                <strong>{alert.prediction}</strong>
+                <span className={labelSourceClass(alert.classification_source)}>
+                  {SOURCE_LABEL[alert.classification_source] || 'ML'}
+                </span>
+              </div>
+              <span>
+                {alert.src_ip}:{alert.src_port} → {alert.dst_ip}:{alert.dst_port}
+              </span>
+              <small>
+                protocol={alert.protocol} | conf={alert.confidence.toFixed(3)} | mitigation={alert.mitigation_state || 'none'}
+              </small>
+              <div className="inline-actions">
+                <button
+                  className="btn tiny danger"
+                  type="button"
+                  disabled={actionBusy}
+                  onClick={() => onAction(alert, 'block_flow')}
+                >
+                  Block Flow Pair
+                </button>
+                <button
+                  className="btn tiny danger"
+                  type="button"
+                  disabled={actionBusy}
+                  onClick={() => onAction(alert, 'block_source')}
+                >
+                  Block Source Host
+                </button>
+                <button
+                  className="btn tiny"
+                  type="button"
+                  disabled={actionBusy}
+                  onClick={() => onAction(alert, 'isolate_port')}
+                >
+                  Disable / Isolate Port
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function ScenariosSection({
+  modeStatus,
+  scenarios,
+  scenarioDraft,
+  setScenarioDraft,
+  actionBusy,
+  runScenario,
+  clearScenarioEvents,
+}) {
+  return (
+    <section className="panel">
+      <div className="panel-title-row">
+        <h2>Host-Targeted Scenario Runner</h2>
+        <span className="muted">Use DEMO / SCENARIO MODE for controlled demonstration labels.</span>
+      </div>
+
+      <div className="scenario-controls">
+        <label>
+          Source host(s)
+          <input
+            value={scenarioDraft.source_hosts}
+            onChange={(event) => setScenarioDraft((prev) => ({ ...prev, source_hosts: event.target.value }))}
+            placeholder="h1,h3"
+          />
+        </label>
+        <label>
+          Destination host
+          <input
+            value={scenarioDraft.destination_host}
+            onChange={(event) => setScenarioDraft((prev) => ({ ...prev, destination_host: event.target.value }))}
+            placeholder="h2"
+          />
+        </label>
+        <label>
+          Repeat
+          <input
+            type="number"
+            min={1}
+            max={200}
+            value={scenarioDraft.repeat}
+            onChange={(event) => setScenarioDraft((prev) => ({ ...prev, repeat: Number(event.target.value) || 1 }))}
+          />
+        </label>
+        <label>
+          Intensity
+          <input
+            type="number"
+            min={1}
+            max={100}
+            value={scenarioDraft.intensity}
+            onChange={(event) => setScenarioDraft((prev) => ({ ...prev, intensity: Number(event.target.value) || 1 }))}
+          />
+        </label>
+        <label>
+          Packet size (bytes)
+          <input
+            type="number"
+            min={64}
+            max={65535}
+            value={scenarioDraft.packet_size}
+            onChange={(event) => setScenarioDraft((prev) => ({ ...prev, packet_size: Number(event.target.value) || 512 }))}
+          />
+        </label>
+        <label>
+          Concurrency
+          <input
+            type="number"
+            min={1}
+            max={64}
+            value={scenarioDraft.concurrency}
+            onChange={(event) => setScenarioDraft((prev) => ({ ...prev, concurrency: Number(event.target.value) || 1 }))}
+          />
+        </label>
+        <label className="checkbox-row">
+          <span>Use real helper command (when configured)</span>
+          <input
+            type="checkbox"
+            checked={scenarioDraft.use_real_helpers}
+            onChange={(event) => setScenarioDraft((prev) => ({ ...prev, use_real_helpers: event.target.checked }))}
+          />
+        </label>
+        <button className="btn ghost" type="button" disabled={actionBusy} onClick={clearScenarioEvents}>
+          Reset / Clear Demo State
+        </button>
+      </div>
+
+      <div className="scenario-grid">
+        {scenarios.map((scenario) => (
+          <article key={scenario.code} className="scenario-card">
+            <h3>{scenario.name}</h3>
+            <p>{scenario.description}</p>
+            <p>
+              Label source:{' '}
+              <span className={labelSourceClass(scenario.default_label_source)}>{scenario.default_label_source}</span>
+            </p>
+            <button
+              className="btn primary"
+              type="button"
+              disabled={actionBusy || modeStatus.mode !== 'DEMO_SCENARIO'}
+              onClick={() => runScenario(scenario.code)}
+            >
+              Run Scenario
+            </button>
+          </article>
+        ))}
+      </div>
+      {modeStatus.mode !== 'DEMO_SCENARIO' && (
+        <p className="empty-message">Switch to DEMO / SCENARIO MODE to run controlled scenarios.</p>
+      )}
+    </section>
+  )
+}
+
+function MitigationSection({
+  mitigationDraft,
+  setMitigationDraft,
+  saveMitigationConfig,
+  manualAction,
+  setManualAction,
+  submitManualMitigationFromPanel,
+  activeMitigations,
+  rollbackMitigation,
+  mitigationEvents,
+  actionBusy,
+}) {
+  return (
+    <section className="section-stack">
+      <section className="panel">
+        <h2>Automatic Mitigation</h2>
+        <div className="mitigation-config">
+          <label>
+            <span>Automatic mitigation enabled</span>
+            <input
+              type="checkbox"
+              checked={mitigationDraft.enabled}
+              onChange={(event) => setMitigationDraft((prev) => ({ ...prev, enabled: event.target.checked }))}
+            />
+          </label>
+          <label>
+            <span>Min confidence</span>
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.01}
+              value={mitigationDraft.min_confidence}
+              onChange={(event) =>
+                setMitigationDraft((prev) => ({ ...prev, min_confidence: Number(event.target.value) }))
+              }
+            />
+          </label>
+          <label>
+            <span>Default timeout (sec)</span>
+            <input
+              type="number"
+              min={0}
+              max={86400}
+              value={mitigationDraft.default_timeout_sec}
+              onChange={(event) =>
+                setMitigationDraft((prev) => ({ ...prev, default_timeout_sec: Number(event.target.value) }))
+              }
+            />
+          </label>
+          <label>
+            <span>Escalate after count</span>
+            <input
+              type="number"
+              min={1}
+              max={1000}
+              value={mitigationDraft.escalate_after_count}
+              onChange={(event) =>
+                setMitigationDraft((prev) => ({ ...prev, escalate_after_count: Number(event.target.value) || 1 }))
+              }
+            />
+          </label>
+          <label>
+            <span>Primary auto action</span>
+            <select
+              value={mitigationDraft.primary_action}
+              onChange={(event) => setMitigationDraft((prev) => ({ ...prev, primary_action: event.target.value }))}
+            >
+              {MITIGATION_ACTIONS.map((action) => (
+                <option key={action.value} value={action.value}>
+                  {action.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button className="btn primary" type="button" disabled={actionBusy} onClick={saveMitigationConfig}>
+            Save Auto Mitigation Config
+          </button>
+        </div>
+      </section>
+
+      <section className="panel">
+        <form className="manual-mitigation-form" onSubmit={submitManualMitigationFromPanel}>
+          <h3>Manual Mitigation (with explicit target confirmation)</h3>
+          <select
+            value={manualAction.action}
+            onChange={(event) => setManualAction((prev) => ({ ...prev, action: event.target.value }))}
+          >
+            {MITIGATION_ACTIONS.map((action) => (
+              <option key={action.value} value={action.value}>
+                {action.label}
+              </option>
+            ))}
+          </select>
+          <input
+            placeholder="Source IP (required for block_flow/block_source)"
+            value={manualAction.src_ip}
+            onChange={(event) => setManualAction((prev) => ({ ...prev, src_ip: event.target.value }))}
+          />
+          <input
+            placeholder="Destination IP (required for block_flow)"
+            value={manualAction.dst_ip}
+            onChange={(event) => setManualAction((prev) => ({ ...prev, dst_ip: event.target.value }))}
+          />
+          <input
+            placeholder="Protocol TCP/UDP (required for block_flow)"
+            value={manualAction.protocol}
+            onChange={(event) => setManualAction((prev) => ({ ...prev, protocol: event.target.value.toUpperCase() }))}
+          />
+          <input
+            placeholder="Switch ID (required for isolate_port)"
+            value={manualAction.switch_id}
+            onChange={(event) => setManualAction((prev) => ({ ...prev, switch_id: event.target.value }))}
+          />
+          <input
+            placeholder="Port (required for isolate_port)"
+            type="number"
+            min={1}
+            value={manualAction.port_id}
+            onChange={(event) => setManualAction((prev) => ({ ...prev, port_id: event.target.value }))}
+          />
+          <input
+            placeholder="Reason"
+            value={manualAction.reason}
+            onChange={(event) => setManualAction((prev) => ({ ...prev, reason: event.target.value }))}
+          />
+          <button className="btn danger" type="submit" disabled={actionBusy}>
+            Submit Manual Mitigation
+          </button>
+        </form>
+      </section>
+
+      <section className="panel">
+        <h2>Active Mitigations</h2>
+        {activeMitigations.length === 0 ? (
+          <p className="empty-message">No active mitigations.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Action</th>
+                  <th>Target</th>
+                  <th>Source</th>
+                  <th>Reason</th>
+                  <th>Status</th>
+                  <th>Rollback</th>
+                </tr>
+              </thead>
+              <tbody>
+                {activeMitigations.map((event) => (
+                  <tr key={event.mitigation_id}>
+                    <td>{event.action}</td>
+                    <td>{event.target_summary}</td>
+                    <td>{event.triggered_by}</td>
+                    <td>{event.reason}</td>
+                    <td>{event.status}</td>
+                    <td>
+                      <button
+                        className="btn tiny ghost"
+                        type="button"
+                        disabled={actionBusy}
+                        onClick={() => rollbackMitigation(event)}
+                      >
+                        Retract
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <h2>Mitigation Event Log (Live Memory)</h2>
+        {mitigationEvents.length === 0 ? (
+          <p className="empty-message">No mitigation events logged yet.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Action</th>
+                  <th>Source</th>
+                  <th>Target</th>
+                  <th>Reason</th>
+                  <th>Status</th>
+                  <th>Enforcement</th>
+                </tr>
+              </thead>
+              <tbody>
+                {mitigationEvents.map((event) => (
+                  <tr key={event.mitigation_id}>
+                    <td>{formatTimestamp(event.timestamp)}</td>
+                    <td>{event.action}</td>
+                    <td>{event.triggered_by}</td>
+                    <td>{event.target_summary}</td>
+                    <td>{event.reason}</td>
+                    <td>{event.status}</td>
+                    <td>{event.enforcement_status}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </section>
+  )
+}
+
+function HealthSection({ healthCards, controllerStatus }) {
+  return (
+    <section className="panel">
+      <div className="panel-title-row">
+        <h2>System Health & Controller Visibility</h2>
+        <span className="muted">Frontend health is local UI runtime.</span>
+      </div>
+      <div className="health-grid">
+        {healthCards.map((item) => (
+          <div key={item.label} className="health-card">
+            <span>{item.label}</span>
+            <strong className={`status-tag ${statusClass(item.value)}`}>{item.value}</strong>
+          </div>
+        ))}
+      </div>
+      <div className="controller-meta">
+        <span>Controller running: {controllerStatus.running ? 'Yes' : 'No'}</span>
+        <span>Polling active: {controllerStatus.polling_active ? 'Yes' : 'No'}</span>
+        <span>Model loaded: {controllerStatus.model_loaded ? 'Yes' : 'No'}</span>
+        <span>Datapaths connected: {controllerStatus.datapath_count}</span>
+        <span>Controller state freshness: {controllerStatus.stale ? 'stale' : 'live'}</span>
+      </div>
+    </section>
+  )
+}
+
+function MethodologySection() {
+  return (
+    <section className="panel">
+      <h2>Methodology / Explainability</h2>
+      <ul className="methodology-list">
+        <li>
+          <strong>REAL ML MODE:</strong> Uses only controller FT-Transformer labels (`label_source=ml`).
+        </li>
+        <li>
+          <strong>DEMO / SCENARIO MODE:</strong> Uses explicit scenario logic for reliable demo coverage (`demo` or `hybrid`).
+        </li>
+        <li>
+          <strong>Label source meanings:</strong> `ml` = direct inference, `demo` = scenario logic, `hybrid` = mixed rule/demo.
+        </li>
+        <li>
+          <strong>Mitigation source meanings:</strong> `manual` = operator action, `automatic` = threshold-triggered policy.
+        </li>
+        <li>
+          <strong>Block Flow Pair:</strong> blocks `src_ip + dst_ip + protocol` as operator concept.
+        </li>
+        <li>
+          <strong>Block Source Host:</strong> blocks all IPv4 from source host (ARP remains available by default).
+        </li>
+        <li>
+          <strong>Disable / Isolate Port:</strong> disables the selected host-facing switch port in Mininet/OVS.
+        </li>
+        <li>
+          Live ML can still classify some synthetic traffic as <em>Normal</em>; DEMO mode exists to provide transparent, repeatable labels.
+        </li>
+      </ul>
+    </section>
+  )
+}
+
+function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
+  const navigate = useNavigate()
   const [health, setHealth] = useState({
     status: 'ok',
     components: {
@@ -108,18 +886,21 @@ function SocDashboard({ currentUser, onLogout }) {
   })
   const [scenarios, setScenarios] = useState([])
   const [mitigationEvents, setMitigationEvents] = useState([])
+  const [activeMitigations, setActiveMitigations] = useState([])
   const [mitigationConfig, setMitigationConfig] = useState({
     enabled: false,
     suspicious_labels: ['DoS_DDoS', 'Other_Attack', 'Congestion'],
     min_confidence: 0.75,
     default_timeout_sec: 300,
     action_order: ['block_flow', 'block_source', 'isolate_port'],
+    escalate_after_count: 3,
   })
   const [mitigationDraft, setMitigationDraft] = useState({
     enabled: false,
     min_confidence: 0.75,
     default_timeout_sec: 300,
     primary_action: 'block_flow',
+    escalate_after_count: 3,
   })
   const [stats, setStats] = useState({
     total_flows: 0,
@@ -130,12 +911,21 @@ function SocDashboard({ currentUser, onLogout }) {
     by_source: {},
     mitigated_flows: 0,
   })
-  const [scenarioRepeat, setScenarioRepeat] = useState(3)
+  const [scenarioDraft, setScenarioDraft] = useState({
+    source_hosts: 'h1',
+    destination_host: 'h2',
+    repeat: 3,
+    intensity: 5,
+    packet_size: 1024,
+    concurrency: 2,
+    use_real_helpers: true,
+  })
   const [manualAction, setManualAction] = useState({
     action: 'block_source',
     src_ip: '',
-    flow_key: '',
-    switch_id: '',
+    dst_ip: '',
+    protocol: 'TCP',
+    switch_id: 's1',
     port_id: '',
     reason: '',
     timeout_sec: 300,
@@ -144,6 +934,20 @@ function SocDashboard({ currentUser, onLogout }) {
   const [loading, setLoading] = useState(true)
   const [actionMessage, setActionMessage] = useState('')
   const [error, setError] = useState('')
+
+  const authedRequest = useCallback(
+    async (path, options) => {
+      try {
+        return await requestJson(path, { ...options, token })
+      } catch (requestError) {
+        if (requestError instanceof ApiError && requestError.status === 401) {
+          onSessionExpired()
+        }
+        throw requestError
+      }
+    },
+    [onSessionExpired, token],
+  )
 
   const loadDashboardData = useCallback(async () => {
     const [
@@ -158,18 +962,20 @@ function SocDashboard({ currentUser, onLogout }) {
       scenarioData,
       mitigationConfigData,
       mitigationEventData,
+      activeMitigationsData,
     ] = await Promise.all([
-      fetchJson('/health'),
-      fetchJson('/mode'),
-      fetchJson('/controller/status'),
-      fetchJson('/flows?limit=250'),
-      fetchJson('/alerts?limit=100'),
-      fetchJson('/sessions?limit=120'),
-      fetchJson('/topology'),
-      fetchJson('/stats'),
-      fetchJson('/scenarios'),
-      fetchJson('/mitigation/config'),
-      fetchJson('/mitigation/events?limit=120'),
+      authedRequest('/health'),
+      authedRequest('/mode'),
+      authedRequest('/controller/status'),
+      authedRequest('/flows?limit=250'),
+      authedRequest('/alerts?limit=100'),
+      authedRequest('/sessions?limit=120'),
+      authedRequest('/topology'),
+      authedRequest('/stats'),
+      authedRequest('/scenarios'),
+      authedRequest('/mitigation/config'),
+      authedRequest('/mitigation/events?limit=120'),
+      authedRequest('/mitigations/active'),
     ])
     setHealth(healthData)
     setModeStatus(modeData)
@@ -182,15 +988,17 @@ function SocDashboard({ currentUser, onLogout }) {
     setScenarios(scenarioData)
     setMitigationConfig(mitigationConfigData)
     setMitigationEvents(mitigationEventData)
+    setActiveMitigations(activeMitigationsData)
     setMitigationDraft((previous) => ({
       ...previous,
       enabled: mitigationConfigData.enabled,
       min_confidence: mitigationConfigData.min_confidence,
       default_timeout_sec: mitigationConfigData.default_timeout_sec,
       primary_action: mitigationConfigData.action_order?.[0] || 'block_flow',
+      escalate_after_count: mitigationConfigData.escalate_after_count || 3,
     }))
     setError('')
-  }, [])
+  }, [authedRequest])
 
   useEffect(() => {
     let active = true
@@ -208,12 +1016,11 @@ function SocDashboard({ currentUser, onLogout }) {
         }
       }
     }
-
     poll()
-    const timer = setInterval(poll, POLL_INTERVAL_MS)
+    const timer = window.setInterval(poll, POLL_INTERVAL_MS)
     return () => {
       active = false
-      clearInterval(timer)
+      window.clearInterval(timer)
     }
   }, [loadDashboardData])
 
@@ -282,17 +1089,22 @@ function SocDashboard({ currentUser, onLogout }) {
 
   const modeMeta = MODE_META[modeStatus.mode] || MODE_META.REAL_ML
 
-  const hasLiveEvents = flows.length > 0
-
   const runManualMitigation = async (payload) => {
+    if (!window.confirm(`Confirm mitigation target:\n\n${mitigationPreview(payload)}`)) {
+      return
+    }
     setActionBusy(true)
     setActionMessage('')
     try {
-      await fetchJson('/mitigate', {
+      const response = await authedRequest('/mitigations/apply', {
         method: 'POST',
-        body: JSON.stringify(payload),
+        body: payload,
       })
-      setActionMessage(`Mitigation accepted: ${payload.action}`)
+      if (response.status === 'accepted') {
+        setActionMessage(`Mitigation enforced: ${response.event.target_summary}`)
+      } else {
+        setActionMessage(`Mitigation failed: ${response.event.enforcement_message || 'enforcement error'}`)
+      }
       await loadDashboardData()
     } catch (requestError) {
       setActionMessage(requestError instanceof Error ? requestError.message : 'Mitigation request failed.')
@@ -301,49 +1113,97 @@ function SocDashboard({ currentUser, onLogout }) {
     }
   }
 
-  const applyActionToFlow = async (flow, action) => {
-    const payload = {
+  const applyActionToAlert = async (flow, action) => {
+    if (action === 'isolate_port') {
+      const portInput = window.prompt('Enter host-facing switch port to isolate:', '1')
+      const port = Number(portInput)
+      if (!Number.isInteger(port) || port < 1) {
+        setActionMessage('Port isolation requires a valid switch port number.')
+        return
+      }
+      await runManualMitigation({
+        action,
+        src_ip: flow.src_ip,
+        switch_id: flow.switch_id || 's1',
+        port_id: port,
+        reason: `Manual alert action for ${flow.prediction}`,
+        timeout_sec: mitigationDraft.default_timeout_sec,
+        triggered_by: 'manual',
+      })
+      return
+    }
+
+    if (action === 'block_flow') {
+      await runManualMitigation({
+        action,
+        src_ip: flow.src_ip,
+        dst_ip: flow.dst_ip,
+        protocol: flow.protocol,
+        reason: `Manual alert action for ${flow.prediction}`,
+        timeout_sec: mitigationDraft.default_timeout_sec,
+        triggered_by: 'manual',
+      })
+      return
+    }
+
+    await runManualMitigation({
       action,
-      flow_key: flow.flow_key,
       src_ip: flow.src_ip,
-      dst_ip: flow.dst_ip,
-      switch_id: flow.switch_id || null,
-      reason: `Manual action from dashboard alert for ${flow.prediction}`,
+      reason: `Manual alert action for ${flow.prediction}`,
       timeout_sec: mitigationDraft.default_timeout_sec,
       triggered_by: 'manual',
-    }
-    await runManualMitigation(payload)
+    })
   }
 
   const applyActionToSession = async (session, action) => {
-    const latest = flows.find((flow) => {
-      if (flow.protocol !== session.protocol) {
-        return false
+    if (action === 'isolate_port') {
+      const portInput = window.prompt('Enter host-facing switch port to isolate:', '1')
+      const port = Number(portInput)
+      if (!Number.isInteger(port) || port < 1) {
+        setActionMessage('Port isolation requires a valid switch port number.')
+        return
       }
-      const pairA = [flow.src_ip, flow.dst_ip].sort().join('|')
-      const pairB = [...session.endpoints].sort().join('|')
-      return pairA === pairB
-    })
-    const payload = {
+      await runManualMitigation({
+        action,
+        src_ip: session.source_entity,
+        switch_id: 's1',
+        port_id: port,
+        reason: `Manual session action for ${session.dominant_label}`,
+        timeout_sec: mitigationDraft.default_timeout_sec,
+        triggered_by: 'manual',
+      })
+      return
+    }
+
+    if (action === 'block_flow') {
+      await runManualMitigation({
+        action,
+        src_ip: session.source_entity,
+        dst_ip: session.destination_entity,
+        protocol: session.protocol,
+        reason: `Manual session action for ${session.dominant_label}`,
+        timeout_sec: mitigationDraft.default_timeout_sec,
+        triggered_by: 'manual',
+      })
+      return
+    }
+
+    await runManualMitigation({
       action,
-      flow_key: action === 'block_flow' ? latest?.flow_key || null : null,
-      src_ip: latest?.src_ip || session.endpoints[0] || null,
-      dst_ip: latest?.dst_ip || session.endpoints[1] || null,
-      switch_id: latest?.switch_id || null,
+      src_ip: session.source_entity,
       reason: `Manual session action for ${session.dominant_label}`,
       timeout_sec: mitigationDraft.default_timeout_sec,
       triggered_by: 'manual',
-    }
-    await runManualMitigation(payload)
+    })
   }
 
   const handleModeSwitch = async (mode) => {
     setActionBusy(true)
     setActionMessage('')
     try {
-      const response = await fetchJson('/mode', {
+      const response = await authedRequest('/mode', {
         method: 'PUT',
-        body: JSON.stringify({ mode }),
+        body: { mode },
       })
       setModeStatus(response)
       setActionMessage(`${MODE_META[mode].label} enabled.`)
@@ -359,11 +1219,27 @@ function SocDashboard({ currentUser, onLogout }) {
     setActionBusy(true)
     setActionMessage('')
     try {
-      const response = await fetchJson('/scenarios/run', {
+      const sourceHosts = scenarioDraft.source_hosts
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean)
+      const response = await authedRequest('/scenarios/run', {
         method: 'POST',
-        body: JSON.stringify({ scenario, repeat: scenarioRepeat }),
+        body: {
+          scenario,
+          source_hosts: sourceHosts,
+          destination_host: scenarioDraft.destination_host.trim(),
+          repeat: scenarioDraft.repeat,
+          intensity: scenarioDraft.intensity,
+          packet_size: scenarioDraft.packet_size,
+          concurrency: scenarioDraft.concurrency,
+          use_real_helpers: scenarioDraft.use_real_helpers,
+        },
       })
-      setActionMessage(`${response.generated_events} demo events generated for ${scenario}.`)
+      const helperNote = response.helper_invoked
+        ? ` helper=${response.helper_output || 'executed'}`
+        : ` helper=${response.helper_output || 'not configured'}`
+      setActionMessage(`${response.generated_events} scenario events generated for ${scenario}.${helperNote}`)
       await loadDashboardData()
     } catch (scenarioError) {
       setActionMessage(scenarioError instanceof Error ? scenarioError.message : 'Scenario run failed.')
@@ -376,7 +1252,7 @@ function SocDashboard({ currentUser, onLogout }) {
     setActionBusy(true)
     setActionMessage('')
     try {
-      const response = await fetchJson('/scenarios/clear', { method: 'POST' })
+      const response = await authedRequest('/scenarios/reset', { method: 'POST' })
       setActionMessage(`Cleared ${response.generated_events} demo/scenario events.`)
       await loadDashboardData()
     } catch (clearError) {
@@ -392,14 +1268,15 @@ function SocDashboard({ currentUser, onLogout }) {
     setActionBusy(true)
     setActionMessage('')
     try {
-      await fetchJson('/mitigation/config', {
+      await authedRequest('/mitigation/config', {
         method: 'PUT',
-        body: JSON.stringify({
+        body: {
           enabled: mitigationDraft.enabled,
           min_confidence: mitigationDraft.min_confidence,
           default_timeout_sec: mitigationDraft.default_timeout_sec,
           action_order: order,
-        }),
+          escalate_after_count: mitigationDraft.escalate_after_count,
+        },
       })
       setActionMessage('Automatic mitigation configuration saved.')
       await loadDashboardData()
@@ -412,17 +1289,44 @@ function SocDashboard({ currentUser, onLogout }) {
 
   const submitManualMitigationFromPanel = async (event) => {
     event.preventDefault()
-    const payload = {
+    await runManualMitigation({
       action: manualAction.action,
       src_ip: manualAction.src_ip || null,
-      flow_key: manualAction.flow_key || null,
+      dst_ip: manualAction.dst_ip || null,
+      protocol: manualAction.protocol || null,
       switch_id: manualAction.switch_id || null,
       port_id: manualAction.port_id ? Number(manualAction.port_id) : null,
       reason: manualAction.reason || 'Manual mitigation request from mitigation panel.',
       timeout_sec: Number(manualAction.timeout_sec) || mitigationDraft.default_timeout_sec,
       triggered_by: 'manual',
+    })
+  }
+
+  const rollbackMitigation = async (mitigationEvent) => {
+    if (
+      !window.confirm(
+        `Rollback mitigation?\n\n${mitigationEvent.target_summary}\nAction: ${mitigationEvent.action}\nSource: ${mitigationEvent.triggered_by}`,
+      )
+    ) {
+      return
     }
-    await runManualMitigation(payload)
+    setActionBusy(true)
+    setActionMessage('')
+    try {
+      const response = await authedRequest('/mitigations/retract', {
+        method: 'POST',
+        body: {
+          mitigation_id: mitigationEvent.mitigation_id,
+          reason: 'Operator rollback from dashboard',
+        },
+      })
+      setActionMessage(response.message)
+      await loadDashboardData()
+    } catch (rollbackError) {
+      setActionMessage(rollbackError instanceof Error ? rollbackError.message : 'Rollback failed.')
+    } finally {
+      setActionBusy(false)
+    }
   }
 
   if (loading) {
@@ -430,7 +1334,7 @@ function SocDashboard({ currentUser, onLogout }) {
       <main className="soc-shell">
         <section className="panel loading-panel">
           <h1>Intelligent SDN SOC Platform</h1>
-          <p>Connecting to backend and loading live controller state...</p>
+          <p>Connecting to backend and loading authenticated live controller state...</p>
         </section>
       </main>
     )
@@ -481,539 +1385,217 @@ function SocDashboard({ currentUser, onLogout }) {
       {error && <div className="error-banner">API error: {error}</div>}
       {actionMessage && <div className="action-banner">{actionMessage}</div>}
 
-      <section className="summary-grid">
-        <article className="summary-card">
-          <h2>Total Flows</h2>
-          <strong>{stats.total_flows}</strong>
-        </article>
-        <article className="summary-card">
-          <h2>Normal Flows</h2>
-          <strong>{stats.normal_flows}</strong>
-        </article>
-        <article className="summary-card">
-          <h2>Suspicious Flows</h2>
-          <strong>{stats.suspicious_flows}</strong>
-        </article>
-        <article className="summary-card">
-          <h2>Active Hosts</h2>
-          <strong>{stats.active_hosts}</strong>
-        </article>
-        <article className="summary-card">
-          <h2>Mitigated Flows</h2>
-          <strong>{stats.mitigated_flows}</strong>
-        </article>
-      </section>
+      <nav className="dashboard-nav" aria-label="Dashboard sections">
+        {NAV_ITEMS.map((item) => (
+          <NavLink key={item.to} to={item.to} className={({ isActive }) => `nav-pill ${isActive ? 'active' : ''}`}>
+            {item.label}
+          </NavLink>
+        ))}
+      </nav>
 
-      <section className="panel">
-        <div className="panel-title-row">
-          <h2>System Health & Controller Visibility</h2>
-          <span className="muted">Frontend status is local UI runtime.</span>
-        </div>
-        <div className="health-grid">
-          {healthCards.map((item) => (
-            <div key={item.label} className="health-card">
-              <span>{item.label}</span>
-              <strong className={`status-tag ${String(item.value).toLowerCase()}`}>{item.value}</strong>
-            </div>
-          ))}
-        </div>
-        <div className="controller-meta">
-          <span>Controller running: {controllerStatus.running ? 'Yes' : 'No'}</span>
-          <span>Polling active: {controllerStatus.polling_active ? 'Yes' : 'No'}</span>
-          <span>Model loaded: {controllerStatus.model_loaded ? 'Yes' : 'No'}</span>
-          <span>Datapaths connected: {controllerStatus.datapath_count}</span>
-          <span>Controller state freshness: {controllerStatus.stale ? 'stale' : 'live'}</span>
-        </div>
-      </section>
-
-      <section className="panel topology-panel">
-        <div className="panel-title-row">
-          <h2>Dynamic SDN Topology (Backend/Controller Driven)</h2>
-          <span className="muted">
-            Generated at {topology.generated_at ? formatTimestamp(topology.generated_at) : 'n/a'}
-          </span>
-        </div>
-        {topology.nodes.length === 0 ? (
-          <p className="empty-message">No topology nodes available yet. Waiting for live events.</p>
-        ) : (
-          <div className="graph-wrap">
-            <svg viewBox={`0 0 ${graphLayout.width} ${graphLayout.height}`} role="img" aria-label="Topology graph">
-              {topology.links.map((link) => {
-                const source = graphLayout.positions[link.source]
-                const target = graphLayout.positions[link.target]
-                if (!source || !target) {
-                  return null
-                }
-                return (
-                  <line
-                    key={link.id}
-                    x1={source.x}
-                    y1={source.y}
-                    x2={target.x}
-                    y2={target.y}
-                    className={`link-line ${link.state}`}
-                  />
-                )
-              })}
-              {topology.traffic_edges.map((edge) => {
-                const source = graphLayout.positions[edge.source]
-                const target = graphLayout.positions[edge.target]
-                if (!source || !target) {
-                  return null
-                }
-                return (
-                  <line
-                    key={edge.id}
-                    x1={source.x}
-                    y1={source.y}
-                    x2={target.x}
-                    y2={target.y}
-                    className={`traffic-line ${edge.state}`}
-                  />
-                )
-              })}
-              {topology.nodes.map((node) => {
-                const position = graphLayout.positions[node.id]
-                if (!position) {
-                  return null
-                }
-                return (
-                  <g key={node.id}>
-                    <circle
-                      cx={position.x}
-                      cy={position.y}
-                      r={node.kind === 'controller' ? 38 : node.kind === 'switch' ? 32 : 28}
-                      className={`node-circle ${node.kind} ${node.status}`}
-                    />
-                    <text x={position.x} y={position.y - 4} textAnchor="middle" className="node-title">
-                      {nodeDisplay(node)}
-                    </text>
-                    <text x={position.x} y={position.y + 12} textAnchor="middle" className="node-subtitle">
-                      {node.kind}
-                    </text>
-                  </g>
-                )
-              })}
-            </svg>
-          </div>
-        )}
-        {topology.traffic_edges.length > 0 && (
-          <div className="traffic-legend">
-            <span className="legend-item normal">Normal traffic</span>
-            <span className="legend-item suspicious">Suspicious traffic</span>
-            <span className="legend-item blocked">Mitigated / Blocked</span>
-          </div>
-        )}
-      </section>
-
-      <section className="layout-grid">
-        <div className="panel">
-          <h2>Class Distribution</h2>
-          {chartRows.length === 0 ? (
-            <p className="empty-message">No live flow events received yet.</p>
-          ) : (
-            <div className="bar-chart">
-              {chartRows.map((item) => (
-                <div className="bar-row" key={item.label}>
-                  <span className="bar-label">{item.label}</span>
-                  <div className="bar-track">
-                    <div className="bar-fill" style={{ width: `${item.percent}%` }} />
-                  </div>
-                  <span className="bar-value">{item.count}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="panel">
-          <h2>Alerts (Suspicious Live Flows)</h2>
-          {alerts.length === 0 ? (
-            <p className="empty-message">
-              {hasLiveEvents ? 'No suspicious flows detected.' : 'No live flow events received yet.'}
-            </p>
-          ) : (
-            <ul className="alerts-list">
-              {alerts.map((alert, index) => (
-                <li key={`${alert.timestamp}-${alert.src_ip}-${index}`}>
-                  <div className="alert-header">
-                    <strong>{alert.prediction}</strong>
-                    <span className={labelSourceClass(alert.classification_source)}>
-                      {SOURCE_LABEL[alert.classification_source] || 'ML'}
-                    </span>
-                  </div>
-                  <span>
-                    {alert.src_ip}:{alert.src_port} → {alert.dst_ip}:{alert.dst_port}
-                  </span>
-                  <small>
-                    conf={alert.confidence.toFixed(3)} | mitigation={alert.mitigation_state || 'none'}
-                  </small>
-                  <div className="inline-actions">
-                    <button
-                      className="btn tiny danger"
-                      type="button"
-                      disabled={actionBusy || !alert.flow_key}
-                      onClick={() => applyActionToFlow(alert, 'block_flow')}
-                    >
-                      Block Flow
-                    </button>
-                    <button
-                      className="btn tiny danger"
-                      type="button"
-                      disabled={actionBusy}
-                      onClick={() => applyActionToFlow(alert, 'block_source')}
-                    >
-                      Block Source
-                    </button>
-                    <button
-                      className="btn tiny"
-                      type="button"
-                      disabled={actionBusy}
-                      onClick={() => applyActionToFlow(alert, 'isolate_port')}
-                    >
-                      Disable / Isolate Port
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </section>
-
-      <section className="layout-grid">
-        <div className="panel">
-          <div className="panel-title-row">
-            <h2>Scenario Runner (Demo Reliability)</h2>
-            <span className="muted">Available only in DEMO / SCENARIO MODE.</span>
-          </div>
-          <div className="scenario-controls">
-            <label>
-              Repeat:
-              <input
-                type="number"
-                min={1}
-                max={50}
-                value={scenarioRepeat}
-                onChange={(event) => setScenarioRepeat(Number(event.target.value) || 1)}
-              />
-            </label>
-            <button className="btn ghost" type="button" disabled={actionBusy} onClick={clearScenarioEvents}>
-              Clear / Reset Demo State
-            </button>
-          </div>
-          <div className="scenario-grid">
-            {scenarios.map((scenario) => (
-              <article key={scenario.code} className="scenario-card">
-                <h3>{scenario.name}</h3>
-                <p>{scenario.description}</p>
-                <p>
-                  Label source: <span className={labelSourceClass(scenario.default_label_source)}>{scenario.default_label_source}</span>
-                </p>
-                <button
-                  className="btn primary"
-                  type="button"
-                  disabled={actionBusy || modeStatus.mode !== 'DEMO_SCENARIO'}
-                  onClick={() => runScenario(scenario.code)}
-                >
-                  Run Scenario
-                </button>
-              </article>
-            ))}
-          </div>
-          {modeStatus.mode !== 'DEMO_SCENARIO' && (
-            <p className="empty-message">Switch to DEMO / SCENARIO MODE to run controlled scenarios.</p>
-          )}
-        </div>
-
-        <div className="panel">
-          <h2>Mitigation Controls</h2>
-          <div className="mitigation-config">
-            <label>
-              <span>Automatic mitigation enabled</span>
-              <input
-                type="checkbox"
-                checked={mitigationDraft.enabled}
-                onChange={(event) =>
-                  setMitigationDraft((previous) => ({ ...previous, enabled: event.target.checked }))
-                }
-              />
-            </label>
-            <label>
-              <span>Min confidence</span>
-              <input
-                type="number"
-                min={0}
-                max={1}
-                step={0.01}
-                value={mitigationDraft.min_confidence}
-                onChange={(event) =>
-                  setMitigationDraft((previous) => ({
-                    ...previous,
-                    min_confidence: Number(event.target.value),
-                  }))
-                }
-              />
-            </label>
-            <label>
-              <span>Default timeout (sec)</span>
-              <input
-                type="number"
-                min={0}
-                max={86400}
-                value={mitigationDraft.default_timeout_sec}
-                onChange={(event) =>
-                  setMitigationDraft((previous) => ({
-                    ...previous,
-                    default_timeout_sec: Number(event.target.value),
-                  }))
-                }
-              />
-            </label>
-            <label>
-              <span>Primary auto action</span>
-              <select
-                value={mitigationDraft.primary_action}
-                onChange={(event) =>
-                  setMitigationDraft((previous) => ({ ...previous, primary_action: event.target.value }))
-                }
-              >
-                {MITIGATION_ACTIONS.map((action) => (
-                  <option key={action.value} value={action.value}>
-                    {action.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button className="btn primary" type="button" disabled={actionBusy} onClick={saveMitigationConfig}>
-              Save Auto Mitigation Config
-            </button>
-          </div>
-
-          <form className="manual-mitigation-form" onSubmit={submitManualMitigationFromPanel}>
-            <h3>Manual Mitigation Panel</h3>
-            <select
-              value={manualAction.action}
-              onChange={(event) => setManualAction((previous) => ({ ...previous, action: event.target.value }))}
-            >
-              {MITIGATION_ACTIONS.map((action) => (
-                <option key={action.value} value={action.value}>
-                  {action.label}
-                </option>
-              ))}
-            </select>
-            <input
-              placeholder="Source IP (optional)"
-              value={manualAction.src_ip}
-              onChange={(event) => setManualAction((previous) => ({ ...previous, src_ip: event.target.value }))}
+      <Routes>
+        <Route path="/" element={<Navigate to="overview" replace />} />
+        <Route path="overview" element={<OverviewSection stats={stats} chartRows={chartRows} />} />
+        <Route path="topology" element={<TopologySection topology={topology} graphLayout={graphLayout} />} />
+        <Route path="raw-flows" element={<RawFlowsSection flows={flows} />} />
+        <Route
+          path="sessions"
+          element={<SessionsSection sessions={sessions} onAction={applyActionToSession} actionBusy={actionBusy} />}
+        />
+        <Route
+          path="alerts"
+          element={
+            <AlertsSection
+              alerts={alerts}
+              hasLiveEvents={flows.length > 0}
+              onAction={applyActionToAlert}
+              actionBusy={actionBusy}
             />
-            <input
-              placeholder="Flow key (optional)"
-              value={manualAction.flow_key}
-              onChange={(event) => setManualAction((previous) => ({ ...previous, flow_key: event.target.value }))}
+          }
+        />
+        <Route
+          path="scenarios"
+          element={
+            <ScenariosSection
+              modeStatus={modeStatus}
+              scenarios={scenarios}
+              scenarioDraft={scenarioDraft}
+              setScenarioDraft={setScenarioDraft}
+              actionBusy={actionBusy}
+              runScenario={runScenario}
+              clearScenarioEvents={clearScenarioEvents}
             />
-            <input
-              placeholder="Switch ID (optional)"
-              value={manualAction.switch_id}
-              onChange={(event) =>
-                setManualAction((previous) => ({ ...previous, switch_id: event.target.value }))
-              }
+          }
+        />
+        <Route
+          path="mitigation"
+          element={
+            <MitigationSection
+              mitigationDraft={mitigationDraft}
+              setMitigationDraft={setMitigationDraft}
+              saveMitigationConfig={saveMitigationConfig}
+              manualAction={manualAction}
+              setManualAction={setManualAction}
+              submitManualMitigationFromPanel={submitManualMitigationFromPanel}
+              activeMitigations={activeMitigations}
+              rollbackMitigation={rollbackMitigation}
+              mitigationEvents={mitigationEvents}
+              actionBusy={actionBusy}
             />
-            <input
-              placeholder="Port (optional)"
-              type="number"
-              min={0}
-              value={manualAction.port_id}
-              onChange={(event) => setManualAction((previous) => ({ ...previous, port_id: event.target.value }))}
-            />
-            <input
-              placeholder="Reason"
-              value={manualAction.reason}
-              onChange={(event) => setManualAction((previous) => ({ ...previous, reason: event.target.value }))}
-            />
-            <button className="btn danger" type="submit" disabled={actionBusy}>
-              Submit Manual Mitigation
-            </button>
-          </form>
-        </div>
-      </section>
-
-      <section className="layout-grid">
-        <div className="panel">
-          <h2>Grouped Sessions / Conversations</h2>
-          {sessions.length === 0 ? (
-            <p className="empty-message">No live sessions available yet.</p>
-          ) : (
-            <div className="session-grid">
-              {sessions.map((session) => (
-                <article key={session.session_id} className={`session-card ${session.suspicious ? 'suspicious' : 'normal'}`}>
-                  <div className="session-top">
-                    <strong>{session.endpoints.join(' ↔ ')}</strong>
-                    <span className={labelSourceClass(session.dominant_label_source)}>
-                      {SOURCE_LABEL[session.dominant_label_source] || 'ML'}
-                    </span>
-                  </div>
-                  <p>
-                    <span className={session.suspicious ? 'tag-alert' : 'tag-normal'}>{session.dominant_label}</span>
-                    {'  '}protocol={session.protocol}
-                  </p>
-                  <p className="muted">
-                    flows={session.flow_count} | confidence avg={session.confidence_avg.toFixed(3)} max=
-                    {session.confidence_max.toFixed(3)}
-                  </p>
-                  <p className="muted">
-                    mitigation={session.mitigation_state} | packets={session.total_packets} | bytes={session.total_bytes}
-                  </p>
-                  <div className="inline-actions">
-                    <button
-                      className="btn tiny danger"
-                      type="button"
-                      disabled={actionBusy}
-                      onClick={() => applyActionToSession(session, 'block_flow')}
-                    >
-                      Block Flow
-                    </button>
-                    <button
-                      className="btn tiny danger"
-                      type="button"
-                      disabled={actionBusy}
-                      onClick={() => applyActionToSession(session, 'block_source')}
-                    >
-                      Block Source
-                    </button>
-                    <button
-                      className="btn tiny"
-                      type="button"
-                      disabled={actionBusy}
-                      onClick={() => applyActionToSession(session, 'isolate_port')}
-                    >
-                      Disable / Isolate Port
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="panel">
-          <h2>Mitigation Event Log (Live Memory)</h2>
-          {mitigationEvents.length === 0 ? (
-            <p className="empty-message">No mitigation events logged yet.</p>
-          ) : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Time</th>
-                    <th>Action</th>
-                    <th>Triggered By</th>
-                    <th>Reason</th>
-                    <th>Target</th>
-                    <th>Source</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {mitigationEvents.map((event) => (
-                    <tr key={event.mitigation_id}>
-                      <td>{formatTimestamp(event.timestamp)}</td>
-                      <td>{event.action}</td>
-                      <td>{event.triggered_by}</td>
-                      <td>{event.reason}</td>
-                      <td>{event.flow_key || event.src_ip || event.switch_id || 'n/a'}</td>
-                      <td>{event.source_label_origin || 'manual'}</td>
-                      <td>{event.status}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      </section>
-
-      <section className="panel">
-        <h2>Raw Directional Flows (Live)</h2>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Timestamp</th>
-                <th>Source</th>
-                <th>Destination</th>
-                <th>Protocol</th>
-                <th>Prediction</th>
-                <th>Confidence</th>
-                <th>Label Source</th>
-                <th>Mode</th>
-                <th>Mitigation</th>
-              </tr>
-            </thead>
-            <tbody>
-              {flows.map((flow, index) => (
-                <tr key={`${flow.timestamp}-${flow.src_ip}-${flow.dst_ip}-${index}`}>
-                  <td>{formatTimestamp(flow.timestamp)}</td>
-                  <td>
-                    {flow.src_ip}:{flow.src_port}
-                  </td>
-                  <td>
-                    {flow.dst_ip}:{flow.dst_port}
-                  </td>
-                  <td>{flow.protocol}</td>
-                  <td>
-                    <span className={flow.prediction === 'Normal' ? 'tag-normal' : 'tag-alert'}>
-                      {flow.prediction}
-                    </span>
-                  </td>
-                  <td>{flow.confidence.toFixed(3)}</td>
-                  <td>
-                    <span className={labelSourceClass(flow.classification_source)}>
-                      {SOURCE_LABEL[flow.classification_source] || 'ML'}
-                    </span>
-                  </td>
-                  <td>{flow.mode}</td>
-                  <td>{flow.mitigation_state || 'none'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {flows.length === 0 && <p className="empty-message">No live flow events received yet.</p>}
-        </div>
-      </section>
+          }
+        />
+        <Route path="health" element={<HealthSection healthCards={healthCards} controllerStatus={controllerStatus} />} />
+        <Route path="methodology" element={<MethodologySection />} />
+        <Route path="*" element={<Navigate to="overview" replace />} />
+      </Routes>
     </main>
   )
 }
 
 function App() {
+  const navigate = useNavigate()
   const [session, setSession] = useState({
-    loggedIn: false,
-    user: '',
+    status: 'checking',
+    token: '',
+    user: null,
+    error: '',
   })
+  const [loginBusy, setLoginBusy] = useState(false)
 
-  if (!session.loggedIn) {
+  const setLoggedOut = useCallback(() => {
+    clearStoredSession()
+    setSession({
+      status: 'unauthenticated',
+      token: '',
+      user: null,
+      error: '',
+    })
+    navigate('/login', { replace: true })
+  }, [navigate])
+
+  const verifyStoredToken = useCallback(async () => {
+    const stored = readStoredSession()
+    if (!stored?.token) {
+      setSession({
+        status: 'unauthenticated',
+        token: '',
+        user: null,
+        error: '',
+      })
+      return
+    }
+    try {
+      const me = await requestJson('/auth/me', { token: stored.token })
+      const persisted = {
+        token: stored.token,
+        user: me.user,
+        expires_at: stored.expires_at || null,
+      }
+      writeStoredSession(persisted)
+      setSession({
+        status: 'authenticated',
+        token: stored.token,
+        user: me.user,
+        error: '',
+      })
+      navigate('/dashboard/overview', { replace: true })
+    } catch {
+      setLoggedOut()
+    }
+  }, [navigate, setLoggedOut])
+
+  useEffect(() => {
+    verifyStoredToken()
+  }, [verifyStoredToken])
+
+  const handleLogin = async ({ identifier, password }) => {
+    setLoginBusy(true)
+    setSession((previous) => ({ ...previous, error: '' }))
+    try {
+      const response = await requestJson('/auth/login', {
+        method: 'POST',
+        body: { identifier, password },
+      })
+      const persisted = {
+        token: response.token,
+        user: response.user,
+        expires_at: response.expires_at,
+      }
+      writeStoredSession(persisted)
+      setSession({
+        status: 'authenticated',
+        token: response.token,
+        user: response.user,
+        error: '',
+      })
+      navigate('/dashboard/overview', { replace: true })
+    } catch (loginError) {
+      setSession({
+        status: 'unauthenticated',
+        token: '',
+        user: null,
+        error: loginError instanceof Error ? loginError.message : 'Login failed.',
+      })
+    } finally {
+      setLoginBusy(false)
+    }
+  }
+
+  const handleLogout = async () => {
+    const stored = readStoredSession()
+    if (stored?.token) {
+      try {
+        await requestJson('/auth/logout', { token: stored.token, method: 'POST' })
+      } catch {
+        // Best effort logout for stateless tokens.
+      }
+    }
+    setLoggedOut()
+  }
+
+  if (session.status === 'checking') {
     return (
-      <LoginGate
-        onSuccess={(identity) => {
-          setSession({
-            loggedIn: true,
-            user: identity,
-          })
-        }}
-      />
+      <main className="login-shell">
+        <section className="login-card">
+          <h1>Loading secure dashboard session...</h1>
+          <p>Validating local token with backend auth service.</p>
+        </section>
+      </main>
     )
   }
 
   return (
-    <SocDashboard
-      currentUser={session.user}
-      onLogout={() =>
-        setSession({
-          loggedIn: false,
-          user: '',
-        })
-      }
-    />
+    <Routes>
+      <Route
+        path="/login"
+        element={
+          session.status === 'authenticated' ? (
+            <Navigate to="/dashboard/overview" replace />
+          ) : (
+            <LoginGate onLogin={handleLogin} loading={loginBusy} backendError={session.error} />
+          )
+        }
+      />
+      <Route
+        path="/dashboard/*"
+        element={
+          <ProtectedRoute authenticated={session.status === 'authenticated'}>
+            <SocDashboard
+              token={session.token}
+              currentUser={session.user?.username || 'admin'}
+              onLogout={handleLogout}
+              onSessionExpired={setLoggedOut}
+            />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="*"
+        element={
+          <Navigate to={session.status === 'authenticated' ? '/dashboard/overview' : '/login'} replace />
+        }
+      />
+    </Routes>
   )
 }
 
