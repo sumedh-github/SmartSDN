@@ -1497,11 +1497,10 @@ function App() {
         user: me.user,
         error: '',
       })
-      navigate('/dashboard/overview', { replace: true })
     } catch {
       setLoggedOut()
     }
-  }, [navigate, setLoggedOut])
+  }, [setLoggedOut])
 
   useEffect(() => {
     verifyStoredToken()
