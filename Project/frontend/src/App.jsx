@@ -854,7 +854,6 @@ function MethodologySection() {
 }
 
 function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
-  const navigate = useNavigate()
   const [health, setHealth] = useState({
     status: 'ok',
     components: {
