@@ -25,6 +25,7 @@ class EnforcementService:
         configured_ofctl = os.getenv("SOC_OVS_OFCTL_BIN", "ovs-ofctl")
         # Resolve to absolute path so sudoers command matching is reliable.
         self._ovs_ofctl = shutil.which(configured_ofctl) or configured_ofctl
+        self._of_proto = os.getenv("SOC_OVS_OPENFLOW_VERSION", "OpenFlow13")
         self._prefer_sudo = os.getenv("SOC_OVS_USE_SUDO", "false").lower() == "true"
         self._flow_table: dict[str, tuple[str, str]] = {}
         self._port_table: dict[str, tuple[str, str]] = {}
@@ -52,14 +53,14 @@ class EnforcementService:
                 if flow_record is None:
                     return EnforcementResult(ok=False, message="No matching active flow rule found for rollback.")
                 bridge, cookie = flow_record
-                self._run([self._ovs_ofctl, "del-flows", bridge, f"cookie={cookie}/-1"])
+                self._run([self._ovs_ofctl, "-O", self._of_proto, "del-flows", bridge, f"cookie={cookie}/-1"])
                 return EnforcementResult(ok=True, message="Flow-based mitigation rollback applied.")
             if event.action == "isolate_port":
                 port_record = self._port_table.pop(event.mitigation_id, None)
                 if port_record is None:
                     return EnforcementResult(ok=False, message="No matching isolated port found for rollback.")
                 bridge, port_id = port_record
-                self._run([self._ovs_ofctl, "mod-port", bridge, port_id, "up"])
+                self._run([self._ovs_ofctl, "-O", self._of_proto, "mod-port", bridge, port_id, "up"])
                 return EnforcementResult(ok=True, message="Port re-enabled successfully.")
         except Exception as exc:  # pragma: no cover
             return EnforcementResult(ok=False, message=f"Rollback enforcement failed: {exc}")
@@ -84,7 +85,7 @@ class EnforcementService:
             f"cookie={cookie},priority=41000,ip,{proto_match},"
             f"nw_src={event.src_ip},nw_dst={event.dst_ip},actions=drop"
         )
-        self._run([self._ovs_ofctl, "add-flow", bridge, flow_expr])
+        self._run([self._ovs_ofctl, "-O", self._of_proto, "add-flow", bridge, flow_expr])
         self._flow_table[event.mitigation_id] = (bridge, cookie)
         return EnforcementResult(
             ok=True,
@@ -98,7 +99,7 @@ class EnforcementService:
         cookie = self._cookie_for(event.mitigation_id)
         # Block IPv4 from source host only, leaving ARP unaffected.
         flow_expr = f"cookie={cookie},priority=40000,ip,nw_src={event.src_ip},actions=drop"
-        self._run([self._ovs_ofctl, "add-flow", bridge, flow_expr])
+        self._run([self._ovs_ofctl, "-O", self._of_proto, "add-flow", bridge, flow_expr])
         self._flow_table[event.mitigation_id] = (bridge, cookie)
         return EnforcementResult(ok=True, message=f"Blocked IPv4 traffic from source host {event.src_ip} on {bridge}.")
 
@@ -107,7 +108,7 @@ class EnforcementService:
             return EnforcementResult(ok=False, message="Port isolation requires port_id.")
         bridge = self._bridge_for(event.switch_id)
         port_id = str(event.port_id)
-        self._run([self._ovs_ofctl, "mod-port", bridge, port_id, "down"])
+        self._run([self._ovs_ofctl, "-O", self._of_proto, "mod-port", bridge, port_id, "down"])
         self._port_table[event.mitigation_id] = (bridge, port_id)
         return EnforcementResult(ok=True, message=f"Port {port_id} on {bridge} moved to down state.")
 
