@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 
@@ -22,6 +23,7 @@ class EnforcementService:
         self._enabled = os.getenv("SOC_ENFORCEMENT_ENABLED", "true").lower() == "true"
         self._bridge_prefix = os.getenv("SOC_OVS_BRIDGE_PREFIX", "s")
         self._ovs_ofctl = os.getenv("SOC_OVS_OFCTL_BIN", "ovs-ofctl")
+        self._prefer_sudo = os.getenv("SOC_OVS_USE_SUDO", "false").lower() == "true"
         self._flow_table: dict[str, tuple[str, str]] = {}
         self._port_table: dict[str, tuple[str, str]] = {}
 
@@ -55,7 +57,7 @@ class EnforcementService:
                 if port_record is None:
                     return EnforcementResult(ok=False, message="No matching isolated port found for rollback.")
                 bridge, port_id = port_record
-                self._run(["ovs-ofctl", "mod-port", bridge, port_id, "up"])
+                self._run([self._ovs_ofctl, "mod-port", bridge, port_id, "up"])
                 return EnforcementResult(ok=True, message="Port re-enabled successfully.")
         except Exception as exc:  # pragma: no cover
             return EnforcementResult(ok=False, message=f"Rollback enforcement failed: {exc}")
@@ -103,7 +105,7 @@ class EnforcementService:
             return EnforcementResult(ok=False, message="Port isolation requires port_id.")
         bridge = self._bridge_for(event.switch_id)
         port_id = str(event.port_id)
-        self._run(["ovs-ofctl", "mod-port", bridge, port_id, "down"])
+        self._run([self._ovs_ofctl, "mod-port", bridge, port_id, "down"])
         self._port_table[event.mitigation_id] = (bridge, port_id)
         return EnforcementResult(ok=True, message=f"Port {port_id} on {bridge} moved to down state.")
 
@@ -117,12 +119,39 @@ class EnforcementService:
         return hex(abs(hash(mitigation_id)) % (2**32))
 
     def _run(self, command: list[str]) -> None:
-        proc = subprocess.run(
+        proc = self._exec(command)
+        if proc.returncode == 0:
+            return
+
+        stderr = proc.stderr.strip() or "unknown command error"
+        needs_permission = "permission denied" in stderr.lower()
+
+        # Optional privileged fallback for lab setups where backend runs unprivileged.
+        if needs_permission and os.geteuid() != 0 and shutil.which("sudo"):
+            if self._prefer_sudo:
+                sudo_proc = self._exec(["sudo", "-n", *command])
+                if sudo_proc.returncode == 0:
+                    return
+                sudo_err = sudo_proc.stderr.strip() or "unknown sudo error"
+                raise RuntimeError(
+                    "OVS command permission denied. Sudo fallback also failed: "
+                    f"{sudo_err}. Configure passwordless sudo for ovs-ofctl or run backend as root."
+                )
+            raise RuntimeError(
+                f"{' '.join(command)} failed ({proc.returncode}): {stderr}. "
+                "Permission denied on OVS socket. Either run backend with sudo, "
+                "or grant the backend user OVS socket access "
+                "(e.g., add user to openvswitch group and re-login). "
+                "You can also set SOC_OVS_USE_SUDO=true to retry with sudo -n."
+            )
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"{' '.join(command)} failed ({proc.returncode}): {stderr}")
+
+    def _exec(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             command,
             check=False,
             capture_output=True,
             text=True,
         )
-        if proc.returncode != 0:
-            stderr = proc.stderr.strip() or "unknown command error"
-            raise RuntimeError(f"{' '.join(command)} failed ({proc.returncode}): {stderr}")
