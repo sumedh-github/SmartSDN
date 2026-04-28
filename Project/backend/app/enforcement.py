@@ -22,7 +22,9 @@ class EnforcementService:
     def __init__(self) -> None:
         self._enabled = os.getenv("SOC_ENFORCEMENT_ENABLED", "true").lower() == "true"
         self._bridge_prefix = os.getenv("SOC_OVS_BRIDGE_PREFIX", "s")
-        self._ovs_ofctl = os.getenv("SOC_OVS_OFCTL_BIN", "ovs-ofctl")
+        configured_ofctl = os.getenv("SOC_OVS_OFCTL_BIN", "ovs-ofctl")
+        # Resolve to absolute path so sudoers command matching is reliable.
+        self._ovs_ofctl = shutil.which(configured_ofctl) or configured_ofctl
         self._prefer_sudo = os.getenv("SOC_OVS_USE_SUDO", "false").lower() == "true"
         self._flow_table: dict[str, tuple[str, str]] = {}
         self._port_table: dict[str, tuple[str, str]] = {}
