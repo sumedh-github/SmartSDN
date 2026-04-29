@@ -22,12 +22,13 @@ class EnforcementService:
     def __init__(self) -> None:
         self._enabled = os.getenv("SOC_ENFORCEMENT_ENABLED", "true").lower() == "true"
         self._bridge_prefix = os.getenv("SOC_OVS_BRIDGE_PREFIX", "s")
+        self._source_block_bridge_max = int(os.getenv("SOC_SOURCE_BLOCK_BRIDGE_MAX", "8"))
         configured_ofctl = os.getenv("SOC_OVS_OFCTL_BIN", "ovs-ofctl")
         # Resolve to absolute path so sudoers command matching is reliable.
         self._ovs_ofctl = shutil.which(configured_ofctl) or configured_ofctl
         self._of_proto = os.getenv("SOC_OVS_OPENFLOW_VERSION", "OpenFlow13")
         self._prefer_sudo = os.getenv("SOC_OVS_USE_SUDO", "false").lower() == "true"
-        self._flow_table: dict[str, tuple[str, str]] = {}
+        self._flow_table: dict[str, list[tuple[str, str]]] = {}
         self._port_table: dict[str, tuple[str, str]] = {}
 
     def apply(self, event: MitigationEvent) -> EnforcementResult:
@@ -49,11 +50,11 @@ class EnforcementService:
             return EnforcementResult(ok=False, message="Enforcement disabled by SOC_ENFORCEMENT_ENABLED=false.")
         try:
             if event.action in {"block_flow", "block_source"}:
-                flow_record = self._flow_table.pop(event.mitigation_id, None)
-                if flow_record is None:
+                flow_records = self._flow_table.pop(event.mitigation_id, None)
+                if not flow_records:
                     return EnforcementResult(ok=False, message="No matching active flow rule found for rollback.")
-                bridge, cookie = flow_record
-                self._run([self._ovs_ofctl, "-O", self._of_proto, "del-flows", bridge, f"cookie={cookie}/-1"])
+                for bridge, cookie in flow_records:
+                    self._run([self._ovs_ofctl, "-O", self._of_proto, "del-flows", bridge, f"cookie={cookie}/-1"])
                 return EnforcementResult(ok=True, message="Flow-based mitigation rollback applied.")
             if event.action == "isolate_port":
                 port_record = self._port_table.pop(event.mitigation_id, None)
@@ -88,7 +89,7 @@ class EnforcementService:
             f"nw_src={event.src_ip},nw_dst={event.dst_ip},actions=drop"
         )
         self._run([self._ovs_ofctl, "-O", self._of_proto, "add-flow", bridge, flow_expr])
-        self._flow_table[event.mitigation_id] = (bridge, cookie)
+        self._flow_table[event.mitigation_id] = [(bridge, cookie)]
         return EnforcementResult(
             ok=True,
             message=f"Applied flow-pair block ({event.src_ip} -> {event.dst_ip}, {proto}) on {bridge}.",
@@ -97,13 +98,32 @@ class EnforcementService:
     def _apply_block_source(self, event: MitigationEvent) -> EnforcementResult:
         if not event.src_ip:
             return EnforcementResult(ok=False, message="Source host mitigation requires src_ip.")
-        bridge = self._bridge_for(event.switch_id)
         cookie = self._cookie_for(event.mitigation_id)
         # Block IPv4 from source host only, leaving ARP unaffected.
         flow_expr = f"cookie={cookie},priority=40000,ip,nw_src={event.src_ip},actions=drop"
-        self._run([self._ovs_ofctl, "-O", self._of_proto, "add-flow", bridge, flow_expr])
-        self._flow_table[event.mitigation_id] = (bridge, cookie)
-        return EnforcementResult(ok=True, message=f"Blocked IPv4 traffic from source host {event.src_ip} on {bridge}.")
+        bridges = self._candidate_source_block_bridges(event.switch_id)
+        applied: list[tuple[str, str]] = []
+        for bridge in bridges:
+            if self._run_allow_missing_bridge(
+                [self._ovs_ofctl, "-O", self._of_proto, "add-flow", bridge, flow_expr]
+            ):
+                applied.append((bridge, cookie))
+
+        if not applied:
+            return EnforcementResult(
+                ok=False,
+                message=(
+                    f"No matching switch bridges found for source block {event.src_ip}. "
+                    "Adjust SOC_OVS_BRIDGE_PREFIX or SOC_SOURCE_BLOCK_BRIDGE_MAX."
+                ),
+            )
+
+        self._flow_table[event.mitigation_id] = applied
+        bridge_list = ", ".join(bridge for bridge, _ in applied)
+        return EnforcementResult(
+            ok=True,
+            message=f"Blocked IPv4 traffic from source host {event.src_ip} on bridges: {bridge_list}.",
+        )
 
     def _apply_isolate_port(self, event: MitigationEvent) -> EnforcementResult:
         if event.port_id is None:
@@ -122,6 +142,26 @@ class EnforcementService:
     def _cookie_for(self, mitigation_id: str) -> str:
         # 32-bit cookie from mitigation id to support precise rollback.
         return hex(abs(hash(mitigation_id)) % (2**32))
+
+    def _candidate_source_block_bridges(self, switch_id: str | None) -> list[str]:
+        candidates = [f"{self._bridge_prefix}{index}" for index in range(1, self._source_block_bridge_max + 1)]
+        if switch_id and switch_id not in candidates:
+            candidates.insert(0, switch_id)
+        return candidates
+
+    def _run_allow_missing_bridge(self, command: list[str]) -> bool:
+        try:
+            self._run(command)
+            return True
+        except RuntimeError as exc:
+            detail = str(exc).lower()
+            if (
+                "is not a bridge or a socket" in detail
+                or "no bridge named" in detail
+                or "no such file or directory" in detail
+            ):
+                return False
+            raise
 
     def _run(self, command: list[str]) -> None:
         proc = self._exec(command)
