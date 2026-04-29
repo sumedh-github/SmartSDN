@@ -280,13 +280,18 @@ class EventStore:
 
         host_ips = sorted({event.src_ip for event in events} | {event.dst_ip for event in events})
         blocked_sources = {mitigation.src_ip for mitigation in active_mitigations if mitigation.action == "block_source"}
+        isolated_sources = {
+            mitigation.src_ip
+            for mitigation in active_mitigations
+            if mitigation.action == "isolate_port" and mitigation.src_ip
+        }
         for ip in host_ips:
             nodes.append(
                 TopologyNode(
                     id=_host_node_id(ip),
                     kind="host",
                     label=ip,
-                    status="mitigated" if ip in blocked_sources else "active",
+                    status="mitigated" if ip in blocked_sources or ip in isolated_sources else "active",
                     metadata={"ip": ip},
                 )
             )
@@ -333,7 +338,7 @@ class EventStore:
                 stats["flow_count"] = int(stats["flow_count"]) + 1
                 stats["packet_count"] = int(stats["packet_count"]) + event.packet_count
                 stats["byte_count"] = int(stats["byte_count"]) + event.byte_count
-                if switch_id in isolated_switches or (switch_id, ip) in isolated_host_pairs:
+                if switch_id in isolated_switches or (switch_id, ip) in isolated_host_pairs or ip in isolated_sources:
                     stats["state"] = "disabled"
                 elif event.mitigation_state == "blocked":
                     stats["state"] = "blocked"
@@ -489,6 +494,7 @@ class EventStore:
             if mitigation.switch_id and event.switch_id != mitigation.switch_id:
                 return False
             if mitigation.src_ip and event.src_ip != mitigation.src_ip:
-                return False
+                if event.dst_ip != mitigation.src_ip:
+                    return False
             return True
         return False
