@@ -8,7 +8,6 @@ from threading import RLock
 from typing import Callable
 
 from backend.app.schemas import (
-    AlertNormalizeRequest,
     ControllerStatusPayload,
     ControllerStatusResponse,
     FlowEvent,

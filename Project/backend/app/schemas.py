@@ -294,6 +294,11 @@ class NormalizeAlertRequest(AlertReviewRequest):
     pass
 
 
+class AlertNormalizeRequest(AlertReviewRequest):
+    """Compatibility alias for legacy store import usage."""
+    pass
+
+
 class AlertOverrideRequest(AlertReviewRequest):
     """Compatibility alias for previously named request payload."""
     pass
