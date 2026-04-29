@@ -62,6 +62,7 @@ class FlowEvent(BaseModel):
     scenario: str | None = None
     notes: str | None = None
     mitigation_state: str = "none"
+    alert_dismissed: bool = False
 
 
 class HealthComponentStatus(BaseModel):

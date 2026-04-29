@@ -140,7 +140,11 @@ class EventStore:
 
     def list_alerts(self, limit: int = 200) -> list[FlowEvent]:
         with self._lock:
-            alerts = [event for event in self._events if _is_suspicious(event.prediction)]
+            alerts = [
+                event
+                for event in self._events
+                if _is_suspicious(event.prediction) and not event.alert_dismissed
+            ]
         return list(reversed(alerts[-limit:]))
 
     def normalize_alert(
@@ -194,6 +198,39 @@ class EventStore:
         if updated is None:
             raise ValueError("Alert not found for normalization.")
         return updated
+
+    def mark_alert_as_mitigated(self, request: AlertReviewRequest) -> FlowEvent:
+        with self._lock:
+            for index in range(len(self._events) - 1, -1, -1):
+                event = self._events[index]
+                key_match = request.flow_key and event.flow_key == request.flow_key
+                tuple_match = (
+                    request.src_ip is not None
+                    and request.dst_ip is not None
+                    and request.protocol is not None
+                    and (request.timestamp is None or event.timestamp == request.timestamp)
+                    and event.src_ip == request.src_ip
+                    and event.dst_ip == request.dst_ip
+                    and event.protocol.upper() == request.protocol.upper()
+                )
+                if key_match or tuple_match:
+                    updated = event.model_copy(
+                        update={
+                            "alert_dismissed": True,
+                            "notes": (
+                                f"{(event.notes + ' | ') if event.notes else ''}"
+                                f"Dismissed as mitigated by operator at {datetime.now(timezone.utc).isoformat()} "
+                                f"(reason: {request.reason or 'flow mitigated review'})."
+                            ),
+                        }
+                    )
+                    self._events[index] = updated
+                    return updated
+        raise ValueError("Alert not found for dismissal.")
+
+    def dismiss_alert(self, request: AlertReviewRequest) -> FlowEvent:
+        # Backward-compatible alias for older internal naming.
+        return self.mark_alert_as_mitigated(request)
 
     def list_sessions(self, limit: int = 500) -> list[SessionView]:
         with self._lock:

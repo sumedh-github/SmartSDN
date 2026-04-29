@@ -479,6 +479,14 @@ function AlertsSection({ alerts, hasLiveEvents, onAction, actionBusy }) {
                 >
                   Mark as Normal (False Positive)
                 </button>
+                <button
+                  className="btn tiny ghost"
+                  type="button"
+                  disabled={actionBusy}
+                  onClick={() => onAction(alert, 'mark_mitigated')}
+                >
+                  Flow Mitigated
+                </button>
               </div>
             </li>
           ))}
@@ -1162,6 +1170,31 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
   }
 
   const applyActionToAlert = async (flow, action) => {
+    if (action === 'mark_mitigated') {
+      setActionBusy(true)
+      setActionMessage('')
+      try {
+        await authedRequest('/alerts/mark-mitigated', {
+          method: 'POST',
+          body: {
+            flow_key: flow.flow_key || null,
+            src_ip: flow.src_ip,
+            dst_ip: flow.dst_ip,
+            protocol: flow.protocol,
+            timestamp: flow.timestamp || null,
+            reason: 'Operator dismissed alert as already mitigated from alerts panel.',
+          },
+        })
+        setActionMessage(`Alert dismissed as mitigated for ${flow.src_ip} -> ${flow.dst_ip} (${flow.protocol}).`)
+        await loadDashboardData()
+      } catch (dismissError) {
+        setActionMessage(dismissError instanceof Error ? dismissError.message : 'Failed to dismiss alert.')
+      } finally {
+        setActionBusy(false)
+      }
+      return
+    }
+
     if (action === 'mark_normal') {
       setActionBusy(true)
       setActionMessage('')

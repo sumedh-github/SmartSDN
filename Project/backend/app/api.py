@@ -308,6 +308,18 @@ def mark_alert_normal(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
+@router.post("/alerts/mark-mitigated", response_model=FlowEvent)
+def mark_alert_mitigated(
+    request: AlertReviewRequest,
+    _: AuthUserResponse = Depends(require_authenticated_user),
+    store: EventStore = Depends(get_store),
+) -> FlowEvent:
+    try:
+        return store.dismiss_alert(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
 @router.get("/sessions", response_model=list[SessionView])
 def sessions(
     limit: int = Query(default=500, ge=1, le=5000),
