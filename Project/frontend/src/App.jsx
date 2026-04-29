@@ -1353,6 +1353,8 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
     if (!window.confirm(`Are you sure you want to ${verb} automatic mitigation?`)) {
       return
     }
+    const primary = mitigationDraft.primary_action
+    const order = [primary, ...MITIGATION_ACTIONS.map((item) => item.value).filter((value) => value !== primary)]
     setActionBusy(true)
     setActionMessage('')
     try {
@@ -1360,11 +1362,17 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
         method: 'PUT',
         body: {
           enabled: nextEnabled,
+          min_confidence: mitigationDraft.min_confidence,
+          default_timeout_sec: mitigationDraft.default_timeout_sec,
+          action_order: order,
+          escalate_after_count: mitigationDraft.escalate_after_count,
         },
       })
       setMitigationDraft((prev) => ({ ...prev, enabled: nextEnabled }))
       setMitigationDraftDirty(false)
-      setActionMessage(`Automatic mitigation ${nextEnabled ? 'enabled' : 'disabled'}.`)
+      setActionMessage(
+        `Automatic mitigation ${nextEnabled ? 'enabled' : 'disabled'} with primary action ${primary}.`,
+      )
       await loadDashboardData()
     } catch (toggleError) {
       setActionMessage(toggleError instanceof Error ? toggleError.message : 'Failed to update automatic mitigation.')
