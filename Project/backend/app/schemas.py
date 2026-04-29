@@ -41,6 +41,7 @@ class AuthSessionResponse(BaseModel):
 
 
 class FlowEvent(BaseModel):
+    event_id: str | None = None
     timestamp: datetime
     src_ip: str
     dst_ip: str
@@ -277,3 +278,13 @@ class MitigationRetractResponse(BaseModel):
     status: str
     message: str
     event: MitigationEvent
+
+
+class AlertOverrideRequest(BaseModel):
+    reason: str | None = None
+
+
+class AlertOverrideResponse(BaseModel):
+    status: str
+    message: str
+    event: FlowEvent

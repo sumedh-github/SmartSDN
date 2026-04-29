@@ -456,6 +456,14 @@ function AlertsSection({ alerts, hasLiveEvents, onAction, actionBusy }) {
                 >
                   Disable / Isolate Port
                 </button>
+                <button
+                  className="btn tiny ghost"
+                  type="button"
+                  disabled={actionBusy}
+                  onClick={() => onAction(alert, 'mark_normal')}
+                >
+                  Mark as Normal (False Positive)
+                </button>
               </div>
             </li>
           ))}
@@ -1118,6 +1126,30 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
   }
 
   const applyActionToAlert = async (flow, action) => {
+    if (action === 'mark_normal') {
+      setActionBusy(true)
+      setActionMessage('')
+      try {
+        await authedRequest('/alerts/mark-normal', {
+          method: 'POST',
+          body: {
+            flow_key: flow.flow_key || null,
+            src_ip: flow.src_ip,
+            dst_ip: flow.dst_ip,
+            protocol: flow.protocol,
+            reason: 'Operator marked as false positive from alerts panel.',
+          },
+        })
+        setActionMessage(`Alert marked as normal for ${flow.src_ip} -> ${flow.dst_ip} (${flow.protocol}).`)
+        await loadDashboardData()
+      } catch (markError) {
+        setActionMessage(markError instanceof Error ? markError.message : 'Failed to mark alert as normal.')
+      } finally {
+        setActionBusy(false)
+      }
+      return
+    }
+
     if (action === 'isolate_port') {
       const portInput = window.prompt('Enter host-facing switch port to isolate:', '1')
       const port = Number(portInput)

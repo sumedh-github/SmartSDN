@@ -8,6 +8,7 @@ from threading import RLock
 from typing import Callable
 
 from backend.app.schemas import (
+    AlertReviewRequest,
     ControllerStatusPayload,
     ControllerStatusResponse,
     FlowEvent,
@@ -141,6 +142,30 @@ class EventStore:
         with self._lock:
             alerts = [event for event in self._events if _is_suspicious(event.prediction)]
         return list(reversed(alerts[-limit:]))
+
+    def mark_alert_as_normal(self, request: AlertReviewRequest) -> FlowEvent:
+        with self._lock:
+            for index in range(len(self._events) - 1, -1, -1):
+                event = self._events[index]
+                if (
+                    event.timestamp == request.timestamp
+                    and event.src_ip == request.src_ip
+                    and event.dst_ip == request.dst_ip
+                    and event.protocol.upper() == request.protocol.upper()
+                ):
+                    updated = event.model_copy(
+                        update={
+                            "prediction": "Normal",
+                            "classification_source": "hybrid",
+                            "notes": (
+                                f"Alert marked as false positive by operator at "
+                                f"{datetime.now(timezone.utc).isoformat()}."
+                            ),
+                        }
+                    )
+                    self._events[index] = updated
+                    return updated
+        raise ValueError("Alert event not found for false-positive review.")
 
     def list_sessions(self, limit: int = 500) -> list[SessionView]:
         with self._lock:
