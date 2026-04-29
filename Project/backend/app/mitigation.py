@@ -86,6 +86,56 @@ class MitigationService:
             hit_key = f"{event.src_ip}|{event.dst_ip}|{event.protocol.upper()}"
             self._automatic_hit_counter[hit_key] += 1
             hit_count = self._automatic_hit_counter[hit_key]
+        selected_action = self._select_primary_auto_action(config)
+        threshold = (
+            f"label in {config.suspicious_labels} and confidence >= {config.min_confidence} "
+            f"(escalate_after_count={config.escalate_after_count}, primary_action={selected_action})"
+        )
+
+        if selected_action == "block_flow":
+            protocol = (event.protocol or "ALL").upper().strip()
+            return MitigationRequest(
+                flow_key=event.flow_key,
+                src_ip=event.src_ip,
+                dst_ip=event.dst_ip,
+                protocol=protocol,
+                switch_id=event.switch_id,
+                action="block_flow",
+                reason=(
+                    f"Automatic mitigation for {event.prediction} (conf={event.confidence:.3f}, "
+                    f"hit_count={hit_count}) with flow-pair blocking."
+                ),
+                threshold=threshold,
+                condition=(
+                    f"label={event.prediction}, confidence={event.confidence:.3f}, hit_count={hit_count}, "
+                    f"flow_pair={event.src_ip}->{event.dst_ip}, protocol={protocol}"
+                ),
+                timeout_sec=config.default_timeout_sec,
+                triggered_by="automatic",
+            )
+
+        if selected_action == "isolate_port":
+            inferred_port = self._infer_source_port(event.src_ip)
+            return MitigationRequest(
+                flow_key=event.flow_key,
+                src_ip=event.src_ip,
+                dst_ip=event.dst_ip,
+                protocol=None,
+                switch_id=event.switch_id or "s1",
+                port_id=inferred_port,
+                action="isolate_port",
+                reason=(
+                    f"Automatic mitigation for {event.prediction} (conf={event.confidence:.3f}, "
+                    f"hit_count={hit_count}) with source-port isolation."
+                ),
+                threshold=threshold,
+                condition=(
+                    f"label={event.prediction}, confidence={event.confidence:.3f}, hit_count={hit_count}, "
+                    f"isolate_switch={event.switch_id or 's1'}, port_id={inferred_port}"
+                ),
+                timeout_sec=config.default_timeout_sec,
+                triggered_by="automatic",
+            )
 
         return MitigationRequest(
             flow_key=event.flow_key,
@@ -93,16 +143,12 @@ class MitigationService:
             dst_ip=event.dst_ip,
             protocol=None,
             switch_id=event.switch_id,
-            # Product requirement: auto mitigation should block source traffic across TCP/UDP/ICMP.
             action="block_source",
             reason=(
                 f"Automatic mitigation for {event.prediction} (conf={event.confidence:.3f}, "
                 f"hit_count={hit_count}) with source-wide IPv4 blocking."
             ),
-            threshold=(
-                f"label in {config.suspicious_labels} and confidence >= {config.min_confidence} "
-                f"(escalate_after_count={config.escalate_after_count})"
-            ),
+            threshold=threshold,
             condition=(
                 f"label={event.prediction}, confidence={event.confidence:.3f}, hit_count={hit_count}, "
                 "blocked_protocols=TCP/UDP/ICMP"
@@ -110,6 +156,19 @@ class MitigationService:
             timeout_sec=config.default_timeout_sec,
             triggered_by="automatic",
         )
+
+    def _select_primary_auto_action(self, config: AutoMitigationConfig) -> str:
+        if config.action_order:
+            return config.action_order[0]
+        return "block_source"
+
+    def _infer_source_port(self, src_ip: str) -> int:
+        parts = src_ip.strip().split(".")
+        if len(parts) == 4 and parts[-1].isdigit():
+            octet = int(parts[-1])
+            if octet > 0:
+                return octet
+        return 1
 
     def _normalize_request(self, request: MitigationRequest) -> MitigationRequest:
         normalized_protocol = request.protocol.upper().strip() if request.protocol else None
