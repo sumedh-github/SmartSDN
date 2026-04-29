@@ -117,8 +117,8 @@ class MitigationService:
         if normalized.action == "block_flow":
             if not normalized.src_ip or not normalized.dst_ip or not normalized.protocol:
                 raise ValueError("Block Flow Pair requires src_ip, dst_ip, and protocol.")
-            if normalized.protocol not in {"TCP", "UDP"}:
-                raise ValueError("Block Flow Pair protocol must be TCP or UDP.")
+            if normalized.protocol not in {"TCP", "UDP", "ICMP"}:
+                raise ValueError("Block Flow Pair protocol must be TCP, UDP, or ICMP.")
         elif normalized.action == "block_source":
             if not normalized.src_ip:
                 raise ValueError("Block Source Host requires src_ip.")

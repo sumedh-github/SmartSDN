@@ -78,6 +78,8 @@ class EnforcementService:
             proto_match = "tcp"
         elif proto == "UDP":
             proto_match = "udp"
+        elif proto == "ICMP":
+            proto_match = "icmp"
         else:
             return EnforcementResult(ok=False, message=f"Unsupported protocol for flow pair block: {proto}")
         cookie = self._cookie_for(event.mitigation_id)

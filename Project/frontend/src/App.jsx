@@ -36,7 +36,6 @@ const NAV_ITEMS = [
   { to: '/dashboard/scenarios', label: 'Scenarios' },
   { to: '/dashboard/mitigation', label: 'Mitigation' },
   { to: '/dashboard/health', label: 'System / Controller Health' },
-  { to: '/dashboard/methodology', label: 'Methodology / About' },
 ]
 
 class ApiError extends Error {
@@ -582,6 +581,7 @@ function ScenariosSection({
 function MitigationSection({
   mitigationDraft,
   setMitigationDraft,
+  onAutoMitigationToggle,
   saveMitigationConfig,
   manualAction,
   setManualAction,
@@ -596,13 +596,17 @@ function MitigationSection({
       <section className="panel">
         <h2>Automatic Mitigation</h2>
         <div className="mitigation-config">
-          <label>
+          <label className="toggle-row">
             <span>Automatic mitigation enabled</span>
-            <input
-              type="checkbox"
-              checked={mitigationDraft.enabled}
-              onChange={(event) => setMitigationDraft((prev) => ({ ...prev, enabled: event.target.checked }))}
-            />
+            <button
+              type="button"
+              className={`toggle-switch ${mitigationDraft.enabled ? 'on' : 'off'}`}
+              onClick={() => onAutoMitigationToggle(!mitigationDraft.enabled)}
+              disabled={actionBusy}
+              aria-pressed={mitigationDraft.enabled}
+            >
+              <span className="toggle-knob" />
+            </button>
           </label>
           <label>
             <span>Min confidence</span>
@@ -683,11 +687,14 @@ function MitigationSection({
             value={manualAction.dst_ip}
             onChange={(event) => setManualAction((prev) => ({ ...prev, dst_ip: event.target.value }))}
           />
-          <input
-            placeholder="Protocol TCP/UDP (required for block_flow)"
+          <select
             value={manualAction.protocol}
-            onChange={(event) => setManualAction((prev) => ({ ...prev, protocol: event.target.value.toUpperCase() }))}
-          />
+            onChange={(event) => setManualAction((prev) => ({ ...prev, protocol: event.target.value }))}
+          >
+            <option value="TCP">TCP</option>
+            <option value="UDP">UDP</option>
+            <option value="ICMP">ICMP</option>
+          </select>
           <input
             placeholder="Switch ID (required for isolate_port)"
             value={manualAction.switch_id}
@@ -815,40 +822,6 @@ function HealthSection({ healthCards, controllerStatus }) {
         <span>Datapaths connected: {controllerStatus.datapath_count}</span>
         <span>Controller state freshness: {controllerStatus.stale ? 'stale' : 'live'}</span>
       </div>
-    </section>
-  )
-}
-
-function MethodologySection() {
-  return (
-    <section className="panel">
-      <h2>Methodology / Explainability</h2>
-      <ul className="methodology-list">
-        <li>
-          <strong>REAL ML MODE:</strong> Uses only controller FT-Transformer labels (`label_source=ml`).
-        </li>
-        <li>
-          <strong>DEMO / SCENARIO MODE:</strong> Uses explicit scenario logic for reliable demo coverage (`demo` or `hybrid`).
-        </li>
-        <li>
-          <strong>Label source meanings:</strong> `ml` = direct inference, `demo` = scenario logic, `hybrid` = mixed rule/demo.
-        </li>
-        <li>
-          <strong>Mitigation source meanings:</strong> `manual` = operator action, `automatic` = threshold-triggered policy.
-        </li>
-        <li>
-          <strong>Block Flow Pair:</strong> blocks `src_ip + dst_ip + protocol` as operator concept.
-        </li>
-        <li>
-          <strong>Block Source Host:</strong> blocks all IPv4 from source host (ARP remains available by default).
-        </li>
-        <li>
-          <strong>Disable / Isolate Port:</strong> disables the selected host-facing switch port in Mininet/OVS.
-        </li>
-        <li>
-          Live ML can still classify some synthetic traffic as <em>Normal</em>; DEMO mode exists to provide transparent, repeatable labels.
-        </li>
-      </ul>
     </section>
   )
 }
@@ -1286,6 +1259,30 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
     }
   }
 
+  const toggleAutoMitigation = async (nextEnabled) => {
+    const verb = nextEnabled ? 'enable' : 'disable'
+    if (!window.confirm(`Are you sure you want to ${verb} automatic mitigation?`)) {
+      return
+    }
+    setActionBusy(true)
+    setActionMessage('')
+    try {
+      await authedRequest('/mitigation/config', {
+        method: 'PUT',
+        body: {
+          enabled: nextEnabled,
+        },
+      })
+      setMitigationDraft((prev) => ({ ...prev, enabled: nextEnabled }))
+      setActionMessage(`Automatic mitigation ${nextEnabled ? 'enabled' : 'disabled'}.`)
+      await loadDashboardData()
+    } catch (toggleError) {
+      setActionMessage(toggleError instanceof Error ? toggleError.message : 'Failed to update automatic mitigation.')
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
   const submitManualMitigationFromPanel = async (event) => {
     event.preventDefault()
     await runManualMitigation({
@@ -1432,6 +1429,7 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
             <MitigationSection
               mitigationDraft={mitigationDraft}
               setMitigationDraft={setMitigationDraft}
+              onAutoMitigationToggle={toggleAutoMitigation}
               saveMitigationConfig={saveMitigationConfig}
               manualAction={manualAction}
               setManualAction={setManualAction}
@@ -1444,7 +1442,6 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
           }
         />
         <Route path="health" element={<HealthSection healthCards={healthCards} controllerStatus={controllerStatus} />} />
-        <Route path="methodology" element={<MethodologySection />} />
         <Route path="*" element={<Navigate to="overview" replace />} />
       </Routes>
     </main>
