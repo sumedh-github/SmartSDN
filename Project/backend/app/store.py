@@ -150,6 +150,7 @@ class EventStore:
         src_ip: str | None,
         dst_ip: str | None,
         protocol: str | None,
+        timestamp: datetime | None,
         reason: str | None,
     ) -> FlowEvent | None:
         with self._lock:
@@ -160,6 +161,7 @@ class EventStore:
                     src_ip is not None
                     and dst_ip is not None
                     and protocol is not None
+                    and (timestamp is None or event.timestamp == timestamp)
                     and event.src_ip == src_ip
                     and event.dst_ip == dst_ip
                     and event.protocol.upper() == protocol.upper()
@@ -186,6 +188,7 @@ class EventStore:
             src_ip=request.src_ip,
             dst_ip=request.dst_ip,
             protocol=request.protocol,
+            timestamp=request.timestamp,
             reason=request.reason,
         )
         if updated is None:

@@ -134,6 +134,18 @@ const labelSourceClass = (source) => {
 
 const statusClass = (value) => String(value || '').toLowerCase().replace(/\s+/g, '_')
 
+const alertItemKey = (alert) =>
+  [
+    alert.event_id || 'event',
+    alert.flow_key || 'flow',
+    alert.timestamp || 'time',
+    alert.src_ip || 'src',
+    alert.src_port ?? 'sp',
+    alert.dst_ip || 'dst',
+    alert.dst_port ?? 'dp',
+    alert.protocol || 'proto',
+  ].join('|')
+
 const mitigationPreview = (payload) => {
   if (payload.action === 'block_flow') {
     return [
@@ -420,8 +432,8 @@ function AlertsSection({ alerts, hasLiveEvents, onAction, actionBusy }) {
         </p>
       ) : (
         <ul className="alerts-list">
-          {alerts.map((alert, index) => (
-            <li key={`${alert.timestamp}-${alert.src_ip}-${index}`}>
+          {alerts.map((alert) => (
+            <li key={alertItemKey(alert)}>
               <div className="alert-header">
                 <strong>{alert.prediction}</strong>
                 <span className={labelSourceClass(alert.classification_source)}>
@@ -1161,6 +1173,7 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
             src_ip: flow.src_ip,
             dst_ip: flow.dst_ip,
             protocol: flow.protocol,
+            timestamp: flow.timestamp || null,
             reason: 'Operator marked as false positive from alerts panel.',
           },
         })
