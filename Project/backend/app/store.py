@@ -8,6 +8,7 @@ from threading import RLock
 from typing import Callable
 
 from backend.app.schemas import (
+    AlertReviewRequest,
     ControllerStatusPayload,
     ControllerStatusResponse,
     FlowEvent,
@@ -178,6 +179,18 @@ class EventStore:
                     self._events[index] = updated
                     return updated
         return None
+
+    def mark_alert_as_normal(self, request: AlertReviewRequest) -> FlowEvent:
+        updated = self.normalize_alert(
+            flow_key=request.flow_key,
+            src_ip=request.src_ip,
+            dst_ip=request.dst_ip,
+            protocol=request.protocol,
+            reason=request.reason,
+        )
+        if updated is None:
+            raise ValueError("Alert not found for normalization.")
+        return updated
 
     def list_sessions(self, limit: int = 500) -> list[SessionView]:
         with self._lock:
@@ -462,7 +475,11 @@ class EventStore:
         if mitigation.action == "block_flow":
             src_match = mitigation.src_ip is None or event.src_ip == mitigation.src_ip
             dst_match = mitigation.dst_ip is None or event.dst_ip == mitigation.dst_ip
-            proto_match = mitigation.protocol is None or event.protocol.upper() == mitigation.protocol.upper()
+            proto_match = (
+                mitigation.protocol is None
+                or mitigation.protocol.upper() == "ALL"
+                or event.protocol.upper() == mitigation.protocol.upper()
+            )
             return src_match and dst_match and proto_match
         if mitigation.action == "block_source" and mitigation.src_ip:
             return event.src_ip == mitigation.src_ip

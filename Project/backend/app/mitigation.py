@@ -113,12 +113,16 @@ class MitigationService:
 
     def _normalize_request(self, request: MitigationRequest) -> MitigationRequest:
         normalized_protocol = request.protocol.upper().strip() if request.protocol else None
+        if normalized_protocol in {"ANY", "*"}:
+            normalized_protocol = "ALL"
+        if normalized_protocol is None and request.action == "block_flow":
+            normalized_protocol = "ALL"
         normalized = request.model_copy(update={"protocol": normalized_protocol})
         if normalized.action == "block_flow":
-            if not normalized.src_ip or not normalized.dst_ip or not normalized.protocol:
-                raise ValueError("Block Flow Pair requires src_ip, dst_ip, and protocol.")
-            if normalized.protocol not in {"TCP", "UDP", "ICMP"}:
-                raise ValueError("Block Flow Pair protocol must be TCP, UDP, or ICMP.")
+            if not normalized.src_ip or not normalized.dst_ip:
+                raise ValueError("Block Flow Pair requires src_ip and dst_ip.")
+            if normalized.protocol is not None and normalized.protocol not in {"TCP", "UDP", "ICMP", "ALL"}:
+                raise ValueError("Block Flow Pair protocol must be TCP, UDP, ICMP, or ALL.")
         elif normalized.action == "block_source":
             if not normalized.src_ip:
                 raise ValueError("Block Source Host requires src_ip.")
@@ -138,7 +142,9 @@ class MitigationService:
 
     def _target_summary(self, request: MitigationRequest) -> str:
         if request.action == "block_flow":
-            return f"flow_pair:{request.src_ip}->{request.dst_ip}:{request.protocol}"
+            return f"flow_pair:{request.src_ip}->{request.dst_ip}:{request.protocol or 'ALL'}"
         if request.action == "block_source":
             return f"source_host:{request.src_ip}"
+        if request.port_id == 0:
+            return f"port:{request.switch_id or 's1'}:all_ports"
         return f"port:{request.switch_id or 's1'}:{request.port_id}"

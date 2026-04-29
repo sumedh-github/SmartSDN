@@ -68,25 +68,33 @@ class EnforcementService:
         return EnforcementResult(ok=False, message=f"Unsupported rollback action: {event.action}")
 
     def _apply_block_flow_pair(self, event: MitigationEvent) -> EnforcementResult:
-        if not event.src_ip or not event.dst_ip or not event.protocol:
+        if not event.src_ip or not event.dst_ip:
             return EnforcementResult(
                 ok=False,
-                message="Flow pair mitigation requires src_ip, dst_ip, and protocol.",
+                message="Flow pair mitigation requires src_ip and dst_ip.",
             )
         bridge = self._bridge_for(event.switch_id)
-        proto = event.protocol.strip().upper()
+        proto = event.protocol.strip().upper() if event.protocol else "ALL"
         if proto == "TCP":
-            proto_match = "tcp"
+            match_fragments = ["tcp"]
         elif proto == "UDP":
-            proto_match = "udp"
+            match_fragments = ["udp"]
         elif proto == "ICMP":
-            proto_match = "icmp"
+            match_fragments = ["icmp"]
+        elif proto == "ALL":
+            match_fragments = ["ip"]
         else:
             return EnforcementResult(ok=False, message=f"Unsupported protocol for flow pair block: {proto}")
         cookie = self._cookie_for(event.mitigation_id)
-        flow_expr = (
-            f"cookie={cookie},priority=41000,ip,{proto_match},"
-            f"nw_src={event.src_ip},nw_dst={event.dst_ip},actions=drop"
+        flow_expr = ",".join(
+            [
+                f"cookie={cookie}",
+                "priority=41000",
+                *match_fragments,
+                f"nw_src={event.src_ip}",
+                f"nw_dst={event.dst_ip}",
+                "actions=drop",
+            ]
         )
         self._run([self._ovs_ofctl, "-O", self._of_proto, "add-flow", bridge, flow_expr])
         self._flow_table[event.mitigation_id] = [(bridge, cookie)]
@@ -129,6 +137,10 @@ class EnforcementService:
         if event.port_id is None:
             return EnforcementResult(ok=False, message="Port isolation requires port_id.")
         bridge = self._bridge_for(event.switch_id)
+        if event.port_id == 0:
+            self._run([self._ovs_ofctl, "-O", self._of_proto, "mod-port", bridge, self._bridge_local_port_token(), "down"])
+            self._port_table[event.mitigation_id] = (bridge, self._bridge_local_port_token())
+            return EnforcementResult(ok=True, message=f"All switch ports on {bridge} moved to down state.")
         port_id = str(event.port_id)
         self._run([self._ovs_ofctl, "-O", self._of_proto, "mod-port", bridge, port_id, "down"])
         self._port_table[event.mitigation_id] = (bridge, port_id)
@@ -142,6 +154,10 @@ class EnforcementService:
     def _cookie_for(self, mitigation_id: str) -> str:
         # 32-bit cookie from mitigation id to support precise rollback.
         return hex(abs(hash(mitigation_id)) % (2**32))
+
+    def _bridge_local_port_token(self) -> str:
+        # OFPP_ALL: apply mod-port to all physical ports on the bridge.
+        return "all"
 
     def _candidate_source_block_bridges(self, switch_id: str | None) -> list[str]:
         candidates = [f"{self._bridge_prefix}{index}" for index in range(1, self._source_block_bridge_max + 1)]

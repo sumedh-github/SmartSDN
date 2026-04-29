@@ -27,6 +27,8 @@ const MITIGATION_ACTIONS = [
   { value: 'isolate_port', label: 'Disable / Isolate Port' },
 ]
 
+const MANUAL_PROTOCOL_OPTIONS = ['ALL', 'TCP', 'UDP', 'ICMP']
+
 const NAV_ITEMS = [
   { to: '/dashboard/overview', label: 'Overview Dashboard' },
   { to: '/dashboard/topology', label: 'Topology' },
@@ -138,20 +140,21 @@ const mitigationPreview = (payload) => {
       'Action: Block Flow Pair',
       `Source IP: ${payload.src_ip || 'n/a'}`,
       `Destination IP: ${payload.dst_ip || 'n/a'}`,
-      `Protocol: ${payload.protocol || 'n/a'}`,
+      `Protocol: ${payload.protocol || 'ALL'}`,
     ].join('\n')
   }
   if (payload.action === 'block_source') {
     return [
       'Action: Block Source Host',
       `Source IP: ${payload.src_ip || 'n/a'}`,
+      `Protocol scope: ${payload.protocol || 'ALL (TCP/UDP/ICMP)'}`,
       'Scope: all IPv4 traffic from source host (ARP not blocked)',
     ].join('\n')
   }
   return [
     'Action: Disable / Isolate Port',
     `Switch: ${payload.switch_id || 's1'}`,
-    `Port: ${payload.port_id ?? 'n/a'}`,
+    `Port: ${payload.port_id === null ? 'ALL' : payload.port_id ?? 'n/a'}`,
     `Source IP hint: ${payload.src_ip || 'n/a'}`,
   ].join('\n')
 }
@@ -601,6 +604,9 @@ function MitigationSection({
   mitigationEvents,
   actionBusy,
 }) {
+  const isBlockFlow = manualAction.action === 'block_flow'
+  const isIsolatePort = manualAction.action === 'isolate_port'
+  const protocolOptions = isIsolatePort ? [] : MANUAL_PROTOCOL_OPTIONS
   return (
     <section className="section-stack">
       <section className="panel">
@@ -706,7 +712,14 @@ function MitigationSection({
           <h3>Manual Mitigation (with explicit target confirmation)</h3>
           <select
             value={manualAction.action}
-            onChange={(event) => setManualAction((prev) => ({ ...prev, action: event.target.value }))}
+            onChange={(event) =>
+              setManualAction((prev) => ({
+                ...prev,
+                action: event.target.value,
+                protocol: event.target.value === 'isolate_port' ? 'ALL' : prev.protocol || 'ALL',
+                port_id: event.target.value === 'isolate_port' ? prev.port_id || 'ALL' : prev.port_id,
+              }))
+            }
           >
             {MITIGATION_ACTIONS.map((action) => (
               <option key={action.value} value={action.value}>
@@ -719,31 +732,42 @@ function MitigationSection({
             value={manualAction.src_ip}
             onChange={(event) => setManualAction((prev) => ({ ...prev, src_ip: event.target.value }))}
           />
-          <input
-            placeholder="Destination IP (required for block_flow)"
-            value={manualAction.dst_ip}
-            onChange={(event) => setManualAction((prev) => ({ ...prev, dst_ip: event.target.value }))}
-          />
-          <select
-            value={manualAction.protocol}
-            onChange={(event) => setManualAction((prev) => ({ ...prev, protocol: event.target.value }))}
-          >
-            <option value="TCP">TCP</option>
-            <option value="UDP">UDP</option>
-            <option value="ICMP">ICMP</option>
-          </select>
+          {isBlockFlow && (
+            <input
+              placeholder="Destination IP (required for block_flow)"
+              value={manualAction.dst_ip}
+              onChange={(event) => setManualAction((prev) => ({ ...prev, dst_ip: event.target.value }))}
+            />
+          )}
+          {!isIsolatePort && (
+            <select
+              value={manualAction.protocol}
+              onChange={(event) => setManualAction((prev) => ({ ...prev, protocol: event.target.value }))}
+            >
+              {protocolOptions.map((protocol) => (
+                <option key={protocol} value={protocol}>
+                  {protocol === 'ALL' ? 'ALL (TCP + UDP + ICMP)' : protocol}
+                </option>
+              ))}
+            </select>
+          )}
           <input
             placeholder="Switch ID (required for isolate_port)"
             value={manualAction.switch_id}
             onChange={(event) => setManualAction((prev) => ({ ...prev, switch_id: event.target.value }))}
           />
-          <input
-            placeholder="Port (required for isolate_port)"
-            type="number"
-            min={1}
+          <select
             value={manualAction.port_id}
             onChange={(event) => setManualAction((prev) => ({ ...prev, port_id: event.target.value }))}
-          />
+            disabled={!isIsolatePort}
+          >
+            <option value="ALL">ALL Ports</option>
+            {Array.from({ length: 16 }, (_, idx) => String(idx + 1)).map((port) => (
+              <option key={port} value={port}>
+                Port {port}
+              </option>
+            ))}
+          </select>
           <input
             placeholder="Reason"
             value={manualAction.reason}
@@ -934,9 +958,9 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
     action: 'block_source',
     src_ip: '',
     dst_ip: '',
-    protocol: 'TCP',
+    protocol: 'ALL',
     switch_id: 's1',
-    port_id: '',
+    port_id: 'ALL',
     reason: '',
     timeout_sec: 300,
   })
@@ -1351,13 +1375,22 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
 
   const submitManualMitigationFromPanel = async (event) => {
     event.preventDefault()
+    const normalizedProtocol = manualAction.action === 'isolate_port' || manualAction.protocol === 'ALL'
+      ? null
+      : manualAction.protocol
+    const normalizedPortId =
+      manualAction.action !== 'isolate_port'
+        ? null
+        : manualAction.port_id === 'ALL'
+          ? 0
+          : Number(manualAction.port_id)
     await runManualMitigation({
       action: manualAction.action,
       src_ip: manualAction.src_ip || null,
       dst_ip: manualAction.dst_ip || null,
-      protocol: manualAction.protocol || null,
+      protocol: normalizedProtocol,
       switch_id: manualAction.switch_id || null,
-      port_id: manualAction.port_id ? Number(manualAction.port_id) : null,
+      port_id: Number.isFinite(normalizedPortId) ? normalizedPortId : null,
       reason: manualAction.reason || 'Manual mitigation request from mitigation panel.',
       timeout_sec: Number(manualAction.timeout_sec) || mitigationDraft.default_timeout_sec,
       triggered_by: 'manual',
