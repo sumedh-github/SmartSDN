@@ -12,6 +12,7 @@ from backend.app.mitigation import MitigationService
 from backend.app.mode import ModeService
 from backend.app.scenario import ScenarioService
 from backend.app.schemas import (
+    AlertReviewRequest,
     AutoMitigationConfig,
     AuthLoginRequest,
     AuthLoginResponse,
@@ -31,7 +32,6 @@ from backend.app.schemas import (
     MitigationResponse,
     ModeStatusResponse,
     ModeUpdateRequest,
-    NormalizeAlertRequest,
     ScenarioDefinition,
     ScenarioRunRequest,
     ScenarioRunResponse,
@@ -296,20 +296,16 @@ def alerts(
     return store.list_alerts(limit=limit)
 
 
-@router.post("/alerts/normalize", response_model=FlowEvent)
-def normalize_alert(
-    request: NormalizeAlertRequest,
+@router.post("/alerts/mark-normal", response_model=FlowEvent)
+def mark_alert_normal(
+    request: AlertReviewRequest,
     _: AuthUserResponse = Depends(require_authenticated_user),
     store: EventStore = Depends(get_store),
 ) -> FlowEvent:
-    normalized = store.normalize_alert(
-        flow_key=request.flow_key,
-        timestamp=request.timestamp,
-        reason=request.reason,
-    )
-    if normalized is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert flow not found.")
-    return normalized
+    try:
+        return store.mark_alert_as_normal(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.get("/sessions", response_model=list[SessionView])

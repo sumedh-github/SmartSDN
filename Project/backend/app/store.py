@@ -8,7 +8,7 @@ from threading import RLock
 from typing import Callable
 
 from backend.app.schemas import (
-    AlertReviewRequest,
+    AlertNormalizeRequest,
     ControllerStatusPayload,
     ControllerStatusResponse,
     FlowEvent,
@@ -143,29 +143,42 @@ class EventStore:
             alerts = [event for event in self._events if _is_suspicious(event.prediction)]
         return list(reversed(alerts[-limit:]))
 
-    def mark_alert_as_normal(self, request: AlertReviewRequest) -> FlowEvent:
+    def normalize_alert(
+        self,
+        *,
+        flow_key: str | None,
+        src_ip: str | None,
+        dst_ip: str | None,
+        protocol: str | None,
+        reason: str | None,
+    ) -> FlowEvent | None:
         with self._lock:
             for index in range(len(self._events) - 1, -1, -1):
                 event = self._events[index]
-                if (
-                    event.timestamp == request.timestamp
-                    and event.src_ip == request.src_ip
-                    and event.dst_ip == request.dst_ip
-                    and event.protocol.upper() == request.protocol.upper()
-                ):
+                key_match = flow_key and event.flow_key == flow_key
+                tuple_match = (
+                    src_ip is not None
+                    and dst_ip is not None
+                    and protocol is not None
+                    and event.src_ip == src_ip
+                    and event.dst_ip == dst_ip
+                    and event.protocol.upper() == protocol.upper()
+                )
+                if key_match or tuple_match:
                     updated = event.model_copy(
                         update={
                             "prediction": "Normal",
                             "classification_source": "hybrid",
                             "notes": (
-                                f"Alert marked as false positive by operator at "
-                                f"{datetime.now(timezone.utc).isoformat()}."
+                                f"{(event.notes + ' | ') if event.notes else ''}"
+                                f"Marked as normal by operator at {datetime.now(timezone.utc).isoformat()} "
+                                f"(reason: {reason or 'false-positive review'})."
                             ),
                         }
                     )
                     self._events[index] = updated
                     return updated
-        raise ValueError("Alert event not found for false-positive review.")
+        return None
 
     def list_sessions(self, limit: int = 500) -> list[SessionView]:
         with self._lock:

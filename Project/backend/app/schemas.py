@@ -280,8 +280,23 @@ class MitigationRetractResponse(BaseModel):
     event: MitigationEvent
 
 
-class AlertOverrideRequest(BaseModel):
+class AlertReviewRequest(BaseModel):
+    flow_key: str | None = None
+    src_ip: str | None = None
+    dst_ip: str | None = None
+    protocol: str | None = None
+    timestamp: datetime | None = None
     reason: str | None = None
+
+
+class NormalizeAlertRequest(AlertReviewRequest):
+    """Compatibility alias for older normalize-alert endpoint usage."""
+    pass
+
+
+class AlertOverrideRequest(AlertReviewRequest):
+    """Compatibility alias for previously named request payload."""
+    pass
 
 
 class AlertOverrideResponse(BaseModel):
