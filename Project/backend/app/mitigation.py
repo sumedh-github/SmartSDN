@@ -87,26 +87,26 @@ class MitigationService:
             self._automatic_hit_counter[hit_key] += 1
             hit_count = self._automatic_hit_counter[hit_key]
 
-        action = config.action_order[0] if config.action_order else "block_flow"
-        if hit_count >= config.escalate_after_count and len(config.action_order) > 1:
-            action = config.action_order[1]
-
         return MitigationRequest(
             flow_key=event.flow_key,
             src_ip=event.src_ip,
             dst_ip=event.dst_ip,
-            protocol=event.protocol.upper(),
+            protocol=None,
             switch_id=event.switch_id,
-            action=action,
+            # Product requirement: auto mitigation should block source traffic across TCP/UDP/ICMP.
+            action="block_source",
             reason=(
                 f"Automatic mitigation for {event.prediction} (conf={event.confidence:.3f}, "
-                f"hit_count={hit_count})."
+                f"hit_count={hit_count}) with source-wide IPv4 blocking."
             ),
             threshold=(
                 f"label in {config.suspicious_labels} and confidence >= {config.min_confidence} "
                 f"(escalate_after_count={config.escalate_after_count})"
             ),
-            condition=f"label={event.prediction}, confidence={event.confidence:.3f}, hit_count={hit_count}",
+            condition=(
+                f"label={event.prediction}, confidence={event.confidence:.3f}, hit_count={hit_count}, "
+                "blocked_protocols=TCP/UDP/ICMP"
+            ),
             timeout_sec=config.default_timeout_sec,
             triggered_by="automatic",
         )

@@ -215,7 +215,7 @@ function TopologySection({ topology, graphLayout }) {
   return (
     <section className="panel topology-panel">
       <div className="panel-title-row">
-        <h2>Backend-Driven Dynamic SDN Topology</h2>
+        <h2>Network Map</h2>
         <span className="muted">Generated at {topology.generated_at ? formatTimestamp(topology.generated_at) : 'n/a'}</span>
       </div>
       {topology.nodes.length === 0 ? (
@@ -1329,7 +1329,7 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
     return (
       <main className="soc-shell">
         <section className="panel loading-panel">
-          <h1>Intelligent SDN SOC Platform</h1>
+          <h1>smartSDN</h1>
           <p>Connecting to backend and loading authenticated live controller state...</p>
         </section>
       </main>
@@ -1340,7 +1340,7 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
     <main className="soc-shell">
       <header className="soc-header">
         <div>
-          <h1>SDN Cyber/SOC Security Platform</h1>
+          <h1>smartSDN</h1>
           <p className="muted">
             Live stream from backend {API_BASE_URL} | Polling every {POLL_INTERVAL_MS / 1000}s
           </p>

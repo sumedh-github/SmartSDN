@@ -30,7 +30,7 @@ function LoginGate({ onLogin, loading, backendError }) {
   return (
     <main className="login-shell">
       <section className="login-card">
-        <div className="login-badge">SDN SOC SECURITY PLATFORM</div>
+        <div className="login-badge">SMARTSDN</div>
         <h1>Sign in to Live Dashboard</h1>
         <p>Single-admin local authentication backed by secure token session.</p>
         <form className="login-form" onSubmit={handleSubmit}>
