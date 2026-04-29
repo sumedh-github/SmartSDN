@@ -1462,6 +1462,7 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
           element={
             <MitigationSection
               mitigationDraft={mitigationDraft}
+              mitigationConfig={mitigationConfig}
               setMitigationDraft={setMitigationDraft}
               setMitigationDraftDirty={setMitigationDraftDirty}
               onAutoMitigationToggle={toggleAutoMitigation}
