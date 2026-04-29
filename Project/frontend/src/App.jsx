@@ -580,7 +580,9 @@ function ScenariosSection({
 
 function MitigationSection({
   mitigationDraft,
+  mitigationConfig,
   setMitigationDraft,
+  setMitigationDraftDirty,
   onAutoMitigationToggle,
   saveMitigationConfig,
   manualAction,
@@ -617,7 +619,10 @@ function MitigationSection({
               step={0.01}
               value={mitigationDraft.min_confidence}
               onChange={(event) =>
-                setMitigationDraft((prev) => ({ ...prev, min_confidence: Number(event.target.value) }))
+                {
+                  setMitigationDraftDirty(true)
+                  setMitigationDraft((prev) => ({ ...prev, min_confidence: Number(event.target.value) }))
+                }
               }
             />
           </label>
@@ -629,7 +634,10 @@ function MitigationSection({
               max={86400}
               value={mitigationDraft.default_timeout_sec}
               onChange={(event) =>
-                setMitigationDraft((prev) => ({ ...prev, default_timeout_sec: Number(event.target.value) }))
+                {
+                  setMitigationDraftDirty(true)
+                  setMitigationDraft((prev) => ({ ...prev, default_timeout_sec: Number(event.target.value) }))
+                }
               }
             />
           </label>
@@ -641,7 +649,10 @@ function MitigationSection({
               max={1000}
               value={mitigationDraft.escalate_after_count}
               onChange={(event) =>
-                setMitigationDraft((prev) => ({ ...prev, escalate_after_count: Number(event.target.value) || 1 }))
+                {
+                  setMitigationDraftDirty(true)
+                  setMitigationDraft((prev) => ({ ...prev, escalate_after_count: Number(event.target.value) || 1 }))
+                }
               }
             />
           </label>
@@ -649,7 +660,10 @@ function MitigationSection({
             <span>Primary auto action</span>
             <select
               value={mitigationDraft.primary_action}
-              onChange={(event) => setMitigationDraft((prev) => ({ ...prev, primary_action: event.target.value }))}
+              onChange={(event) => {
+                setMitigationDraftDirty(true)
+                setMitigationDraft((prev) => ({ ...prev, primary_action: event.target.value }))
+              }}
             >
               {MITIGATION_ACTIONS.map((action) => (
                 <option key={action.value} value={action.value}>
@@ -658,9 +672,24 @@ function MitigationSection({
               ))}
             </select>
           </label>
-          <button className="btn primary" type="button" disabled={actionBusy} onClick={saveMitigationConfig}>
+          <button className="btn primary" type="button" disabled={actionBusy || mitigationDraft.enabled} onClick={saveMitigationConfig}>
             Save Auto Mitigation Config
           </button>
+          {mitigationDraft.enabled && (
+            <p className="empty-message">
+              Auto mitigation is ON. Disable it to edit thresholds/actions, then save and re-enable.
+            </p>
+          )}
+          {!mitigationDraft.enabled && (
+            <p className="empty-message">
+              Editing draft values only. Click "Save Auto Mitigation Config" to apply changes.
+            </p>
+          )}
+          {mitigationConfig.enabled !== mitigationDraft.enabled && (
+            <p className="empty-message">
+              Unsaved toggle state detected. Current backend state: {mitigationConfig.enabled ? 'enabled' : 'disabled'}.
+            </p>
+          )}
         </div>
       </section>
 
@@ -874,6 +903,7 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
     primary_action: 'block_flow',
     escalate_after_count: 3,
   })
+  const [mitigationDraftDirty, setMitigationDraftDirty] = useState(false)
   const [stats, setStats] = useState({
     total_flows: 0,
     normal_flows: 0,
@@ -961,16 +991,18 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
     setMitigationConfig(mitigationConfigData)
     setMitigationEvents(mitigationEventData)
     setActiveMitigations(activeMitigationsData)
-    setMitigationDraft((previous) => ({
-      ...previous,
-      enabled: mitigationConfigData.enabled,
-      min_confidence: mitigationConfigData.min_confidence,
-      default_timeout_sec: mitigationConfigData.default_timeout_sec,
-      primary_action: mitigationConfigData.action_order?.[0] || 'block_flow',
-      escalate_after_count: mitigationConfigData.escalate_after_count || 3,
-    }))
+    if (!mitigationDraftDirty) {
+      setMitigationDraft((previous) => ({
+        ...previous,
+        enabled: mitigationConfigData.enabled,
+        min_confidence: mitigationConfigData.min_confidence,
+        default_timeout_sec: mitigationConfigData.default_timeout_sec,
+        primary_action: mitigationConfigData.action_order?.[0] || 'block_flow',
+        escalate_after_count: mitigationConfigData.escalate_after_count || 3,
+      }))
+    }
     setError('')
-  }, [authedRequest])
+  }, [authedRequest, mitigationDraftDirty])
 
   useEffect(() => {
     let active = true
@@ -1250,6 +1282,7 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
           escalate_after_count: mitigationDraft.escalate_after_count,
         },
       })
+      setMitigationDraftDirty(false)
       setActionMessage('Automatic mitigation configuration saved.')
       await loadDashboardData()
     } catch (configError) {
@@ -1274,6 +1307,7 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
         },
       })
       setMitigationDraft((prev) => ({ ...prev, enabled: nextEnabled }))
+      setMitigationDraftDirty(false)
       setActionMessage(`Automatic mitigation ${nextEnabled ? 'enabled' : 'disabled'}.`)
       await loadDashboardData()
     } catch (toggleError) {
@@ -1429,6 +1463,7 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
             <MitigationSection
               mitigationDraft={mitigationDraft}
               setMitigationDraft={setMitigationDraft}
+              setMitigationDraftDirty={setMitigationDraftDirty}
               onAutoMitigationToggle={toggleAutoMitigation}
               saveMitigationConfig={saveMitigationConfig}
               manualAction={manualAction}

@@ -38,6 +38,8 @@ def create_app() -> FastAPI:
     app.state.scenario_service = ScenarioService(
         store=app.state.event_store,
         mode_service=app.state.mode_service,
+        mitigation_service=app.state.mitigation_service,
+        enforcement_service=app.state.enforcement_service,
     )
     app.include_router(api_router)
     return app

@@ -8,6 +8,8 @@ import subprocess
 from datetime import datetime, timezone
 from typing import Callable
 
+from backend.app.enforcement import EnforcementService
+from backend.app.mitigation import MitigationService
 from backend.app.mode import ModeService
 from backend.app.schemas import FlowEvent, ScenarioDefinition, ScenarioRunRequest
 from backend.app.store import EventStore
@@ -67,9 +69,17 @@ def _build_event(
 class ScenarioService:
     """Produces deterministic scenario traffic events for demo reliability."""
 
-    def __init__(self, store: EventStore, mode_service: ModeService) -> None:
+    def __init__(
+        self,
+        store: EventStore,
+        mode_service: ModeService,
+        mitigation_service: MitigationService,
+        enforcement_service: EnforcementService,
+    ) -> None:
         self._store = store
         self._mode_service = mode_service
+        self._mitigation_service = mitigation_service
+        self._enforcement_service = enforcement_service
         self._counter = 0
         self._definitions = [
             ScenarioDefinition(
@@ -146,13 +156,43 @@ class ScenarioService:
                     concurrency=request.concurrency,
                     helper_invoked=helper_invoked,
                 )
-                self._store.add_event(event)
+                stored_event = self._store.add_event(event)
+                self._run_auto_mitigation_if_needed(stored_event)
                 generated += 1
         return {
             "generated_events": generated,
             "helper_invoked": helper_invoked,
             "helper_output": helper_output,
         }
+
+    def _run_auto_mitigation_if_needed(self, event: FlowEvent) -> None:
+        if not self._mitigation_service.should_auto_mitigate(event):
+            return
+
+        auto_request = self._mitigation_service.auto_mitigation_request(event)
+        mitigation_event = self._mitigation_service.register_request(auto_request).model_copy(
+            update={
+                "source_label": event.prediction,
+                "source_label_origin": event.classification_source,
+            }
+        )
+        enforcement_result = self._enforcement_service.apply(mitigation_event)
+        if enforcement_result.ok:
+            mitigation_event = mitigation_event.model_copy(
+                update={
+                    "enforcement_status": "applied",
+                    "enforcement_message": enforcement_result.message,
+                }
+            )
+        else:
+            mitigation_event = mitigation_event.model_copy(
+                update={
+                    "status": "failed",
+                    "enforcement_status": "failed",
+                    "enforcement_message": enforcement_result.message,
+                }
+            )
+        self._store.register_mitigation(mitigation_event)
 
     def _normalize_source_hosts(self, source_hosts: list[str] | None) -> list[str]:
         if not source_hosts:
