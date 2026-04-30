@@ -120,6 +120,44 @@ mininet> pingall
 mininet> iperf h1 h2
 ```
 
+### Optional: reusable Mininet `net` dump command for backend topology adapters
+
+If you are using the backend topology-discovery variant that supports
+`SOC_MININET_NET_CMD`, this repository includes a reusable helper script:
+
+```bash
+Project/scripts/mininet_net_dump.sh
+```
+
+Exact steps:
+
+1. Start Mininet inside a tmux session named `mn`:
+
+   ```bash
+   tmux new -s mn
+   sudo mn --topo single,3 --mac --switch ovsk,protocols=OpenFlow13 --controller remote
+   ```
+
+2. In another terminal, export the backend command:
+
+   ```bash
+   cd Project
+   chmod +x scripts/mininet_net_dump.sh
+   export SOC_MININET_NET_CMD="$PWD/scripts/mininet_net_dump.sh"
+   ```
+
+3. Start backend in that same shell so it inherits the env var:
+
+   ```bash
+   python3 -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+   ```
+
+Optional overrides:
+- `MININET_TMUX_SESSION` (default: `mn`)
+- `MININET_TMUX_PANE` (default: `0.0`)
+- `MININET_CAPTURE_LINES` (default: `300`)
+- `MININET_DUMP_WAIT_SECONDS` (default: `4`)
+
 ## 7) Start backend API (FastAPI)
 
 From `Project/`:

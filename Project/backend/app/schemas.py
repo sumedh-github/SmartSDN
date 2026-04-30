@@ -98,6 +98,7 @@ class TopologyTrafficEdge(BaseModel):
 
 class TopologyResponse(BaseModel):
     generated_at: datetime
+    topology_source: Literal["event_derived", "mininet_net"] = "event_derived"
     nodes: list[TopologyNode]
     links: list[TopologyLink]
     traffic_edges: list[TopologyTrafficEdge]
