@@ -175,9 +175,11 @@ class EventStore:
         controller_status = self.controller_status()
 
         discovered_topology = self._discover_topology_from_mininet_net()
+        topology_source = "event_derived"
         discovered_host_edges: dict[str, str] = {}
         discovered_switch_links: set[tuple[str, str]] = set()
         if discovered_topology is not None:
+            topology_source = "mininet_net"
             switch_ids = discovered_topology["switches"]
             discovered_host_edges = discovered_topology["host_edges"]
             discovered_switch_links = discovered_topology["switch_links"]
@@ -336,6 +338,7 @@ class EventStore:
             nodes=nodes,
             links=links,
             traffic_edges=traffic_edges,
+            source=topology_source,
         )
 
     def stats(self) -> dict[str, object]:
