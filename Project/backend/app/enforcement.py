@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -29,7 +30,7 @@ class EnforcementService:
         self._of_proto = os.getenv("SOC_OVS_OPENFLOW_VERSION", "OpenFlow13")
         self._prefer_sudo = os.getenv("SOC_OVS_USE_SUDO", "false").lower() == "true"
         self._flow_table: dict[str, list[tuple[str, str]]] = {}
-        self._port_table: dict[str, tuple[str, str]] = {}
+        self._port_table: dict[str, list[tuple[str, str]]] = {}
 
     def apply(self, event: MitigationEvent) -> EnforcementResult:
         if not self._enabled:
@@ -57,11 +58,13 @@ class EnforcementService:
                     self._run([self._ovs_ofctl, "-O", self._of_proto, "del-flows", bridge, f"cookie={cookie}/-1"])
                 return EnforcementResult(ok=True, message="Flow-based mitigation rollback applied.")
             if event.action == "isolate_port":
-                port_record = self._port_table.pop(event.mitigation_id, None)
-                if port_record is None:
+                port_records = self._port_table.pop(event.mitigation_id, None)
+                if not port_records:
                     return EnforcementResult(ok=False, message="No matching isolated port found for rollback.")
-                bridge, port_id = port_record
-                self._run([self._ovs_ofctl, "-O", self._of_proto, "mod-port", bridge, port_id, "up"])
+                for bridge, port_id in port_records:
+                    self._run_allow_missing_port(
+                        [self._ovs_ofctl, "-O", self._of_proto, "mod-port", bridge, port_id, "up"]
+                    )
                 return EnforcementResult(ok=True, message="Port re-enabled successfully.")
         except Exception as exc:  # pragma: no cover
             return EnforcementResult(ok=False, message=f"Rollback enforcement failed: {exc}")
@@ -138,12 +141,26 @@ class EnforcementService:
             return EnforcementResult(ok=False, message="Port isolation requires port_id.")
         bridge = self._bridge_for(event.switch_id)
         if event.port_id == 0:
-            self._run([self._ovs_ofctl, "-O", self._of_proto, "mod-port", bridge, self._bridge_local_port_token(), "down"])
-            self._port_table[event.mitigation_id] = (bridge, self._bridge_local_port_token())
-            return EnforcementResult(ok=True, message=f"All switch ports on {bridge} moved to down state.")
+            ports = self._list_bridge_ports(bridge)
+            isolated: list[tuple[str, str]] = []
+            for port in ports:
+                if self._run_allow_missing_port(
+                    [self._ovs_ofctl, "-O", self._of_proto, "mod-port", bridge, port, "down"]
+                ):
+                    isolated.append((bridge, port))
+            if not isolated:
+                return EnforcementResult(
+                    ok=False,
+                    message=f"No usable switch ports found on {bridge} for all-port isolation.",
+                )
+            self._port_table[event.mitigation_id] = isolated
+            return EnforcementResult(
+                ok=True,
+                message=f"Isolated {len(isolated)} switch ports on {bridge}.",
+            )
         port_id = str(event.port_id)
         self._run([self._ovs_ofctl, "-O", self._of_proto, "mod-port", bridge, port_id, "down"])
-        self._port_table[event.mitigation_id] = (bridge, port_id)
+        self._port_table[event.mitigation_id] = [(bridge, port_id)]
         return EnforcementResult(ok=True, message=f"Port {port_id} on {bridge} moved to down state.")
 
     def _bridge_for(self, switch_id: str | None) -> str:
@@ -155,9 +172,20 @@ class EnforcementService:
         # 32-bit cookie from mitigation id to support precise rollback.
         return hex(abs(hash(mitigation_id)) % (2**32))
 
-    def _bridge_local_port_token(self) -> str:
-        # OFPP_ALL: apply mod-port to all physical ports on the bridge.
-        return "all"
+    def _list_bridge_ports(self, bridge: str) -> list[str]:
+        output = self._run_capture([self._ovs_ofctl, "-O", self._of_proto, "dump-ports-desc", bridge])
+        ports: list[str] = []
+        for line in output.splitlines():
+            match = re.match(r"^\s*(\d+)\(([^)]+)\):", line)
+            if not match:
+                continue
+            port_no = int(match.group(1))
+            port_name = match.group(2).strip()
+            # Skip OVS local/internal pseudo ports.
+            if port_no >= 65534 or port_name.lower() == "local":
+                continue
+            ports.append(port_name)
+        return ports
 
     def _candidate_source_block_bridges(self, switch_id: str | None) -> list[str]:
         candidates = [f"{self._bridge_prefix}{index}" for index in range(1, self._source_block_bridge_max + 1)]
@@ -178,6 +206,34 @@ class EnforcementService:
             ):
                 return False
             raise
+
+    def _run_allow_missing_port(self, command: list[str]) -> bool:
+        try:
+            self._run(command)
+            return True
+        except RuntimeError as exc:
+            detail = str(exc).lower()
+            if "couldn't find port" in detail or "no port named" in detail:
+                return False
+            raise
+
+    def _run_capture(self, command: list[str]) -> str:
+        proc = self._exec(command)
+        if proc.returncode == 0:
+            return proc.stdout or ""
+
+        stderr = proc.stderr.strip() or "unknown command error"
+        needs_permission = "permission denied" in stderr.lower()
+        if needs_permission and os.geteuid() != 0 and shutil.which("sudo") and self._prefer_sudo:
+            sudo_proc = self._exec(["sudo", "-n", *command])
+            if sudo_proc.returncode == 0:
+                return sudo_proc.stdout or ""
+            sudo_err = sudo_proc.stderr.strip() or "unknown sudo error"
+            raise RuntimeError(
+                "OVS command permission denied. Sudo fallback also failed: "
+                f"{sudo_err}. Configure passwordless sudo for ovs-ofctl or run backend as root."
+            )
+        raise RuntimeError(f"{' '.join(command)} failed ({proc.returncode}): {stderr}")
 
     def _run(self, command: list[str]) -> None:
         proc = self._exec(command)
