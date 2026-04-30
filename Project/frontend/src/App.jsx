@@ -1027,56 +1027,72 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
   )
 
   const loadDashboardData = useCallback(async () => {
-    const [
-      healthData,
-      modeData,
-      controllerData,
-      flowData,
-      alertData,
-      sessionData,
-      topologyData,
-      statsData,
-      scenarioData,
-      mitigationConfigData,
-      mitigationEventData,
-      activeMitigationsData,
-    ] = await Promise.all([
-      authedRequest('/health'),
-      authedRequest('/mode'),
-      authedRequest('/controller/status'),
-      authedRequest('/flows?limit=250'),
-      authedRequest('/alerts?limit=100'),
-      authedRequest('/sessions?limit=120'),
-      authedRequest('/topology'),
-      authedRequest('/stats'),
-      authedRequest('/scenarios'),
-      authedRequest('/mitigation/config'),
-      authedRequest('/mitigation/events?limit=120'),
-      authedRequest('/mitigations/active'),
-    ])
-    setHealth(healthData)
-    setModeStatus(modeData)
-    setControllerStatus(controllerData)
-    setFlows(flowData)
-    setAlerts(alertData)
-    setSessions(sessionData)
-    setTopology(topologyData)
-    setStats(statsData)
-    setScenarios(scenarioData)
-    setMitigationConfig(mitigationConfigData)
-    setMitigationEvents(mitigationEventData)
-    setActiveMitigations(activeMitigationsData)
-    if (!mitigationDraftDirty) {
-      setMitigationDraft((previous) => ({
-        ...previous,
-        enabled: mitigationConfigData.enabled,
-        min_confidence: mitigationConfigData.min_confidence,
-        default_timeout_sec: mitigationConfigData.default_timeout_sec,
-        primary_action: mitigationConfigData.action_order?.[0] || 'block_flow',
-        escalate_after_count: mitigationConfigData.escalate_after_count || 3,
-      }))
+    const read = async (key, promise) => {
+      try {
+        const data = await promise
+        return { key, data }
+      } catch (requestError) {
+        return { key, error: requestError }
+      }
     }
-    setError('')
+
+    const results = await Promise.all([
+      read('health', authedRequest('/health')),
+      read('mode', authedRequest('/mode')),
+      read('controller', authedRequest('/controller/status')),
+      read('flows', authedRequest('/flows?limit=250')),
+      read('alerts', authedRequest('/alerts?limit=100')),
+      read('sessions', authedRequest('/sessions?limit=120')),
+      read('topology', authedRequest('/topology')),
+      read('stats', authedRequest('/stats')),
+      read('scenarios', authedRequest('/scenarios')),
+      read('mitigationConfig', authedRequest('/mitigation/config')),
+      read('mitigationEvents', authedRequest('/mitigation/events?limit=120')),
+      read('activeMitigations', authedRequest('/mitigations/active')),
+    ])
+
+    const dataByKey = {}
+    const failures = []
+    for (const result of results) {
+      if (Object.hasOwn(result, 'data')) {
+        dataByKey[result.key] = result.data
+      } else {
+        const detail = result.error instanceof Error ? result.error.message : 'request failed'
+        failures.push(`${result.key}: ${detail}`)
+      }
+    }
+
+    if (dataByKey.health) setHealth(dataByKey.health)
+    if (dataByKey.mode) setModeStatus(dataByKey.mode)
+    if (dataByKey.controller) setControllerStatus(dataByKey.controller)
+    if (dataByKey.flows) setFlows(dataByKey.flows)
+    if (dataByKey.alerts) setAlerts(dataByKey.alerts)
+    if (dataByKey.sessions) setSessions(dataByKey.sessions)
+    if (dataByKey.topology) setTopology(dataByKey.topology)
+    if (dataByKey.stats) setStats(dataByKey.stats)
+    if (dataByKey.scenarios) setScenarios(dataByKey.scenarios)
+    if (dataByKey.mitigationConfig) {
+      const mitigationConfigData = dataByKey.mitigationConfig
+      setMitigationConfig(mitigationConfigData)
+      if (!mitigationDraftDirty) {
+        setMitigationDraft((previous) => ({
+          ...previous,
+          enabled: mitigationConfigData.enabled,
+          min_confidence: mitigationConfigData.min_confidence,
+          default_timeout_sec: mitigationConfigData.default_timeout_sec,
+          primary_action: mitigationConfigData.action_order?.[0] || 'block_flow',
+          escalate_after_count: mitigationConfigData.escalate_after_count || 3,
+        }))
+      }
+    }
+    if (dataByKey.mitigationEvents) setMitigationEvents(dataByKey.mitigationEvents)
+    if (dataByKey.activeMitigations) setActiveMitigations(dataByKey.activeMitigations)
+
+    if (failures.length === 0) {
+      setError('')
+    } else {
+      setError(`Partial dashboard refresh issues: ${failures.join(' | ')}`)
+    }
   }, [authedRequest, mitigationDraftDirty])
 
   useEffect(() => {
