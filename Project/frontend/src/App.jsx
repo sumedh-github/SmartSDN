@@ -153,6 +153,7 @@ const mitigationPreview = (payload) => {
       `Source IP: ${payload.src_ip || 'n/a'}`,
       `Destination IP: ${payload.dst_ip || 'n/a'}`,
       `Protocol: ${payload.protocol || 'ALL'}`,
+      `Switch scope: ${payload.switch_id || 'all discovered switches'}`,
     ].join('\n')
   }
   if (payload.action === 'block_source') {
@@ -160,6 +161,7 @@ const mitigationPreview = (payload) => {
       'Action: Block Source Host',
       `Source IP: ${payload.src_ip || 'n/a'}`,
       `Protocol scope: ${payload.protocol || 'ALL (TCP/UDP/ICMP)'}`,
+      `Switch scope: ${payload.switch_id || 'all discovered switches'}`,
       'Scope: all IPv4 traffic from source host (ARP not blocked)',
     ].join('\n')
   }
@@ -624,8 +626,11 @@ function MitigationSection({
   actionBusy,
 }) {
   const isBlockFlow = manualAction.action === 'block_flow'
+  const isBlockSource = manualAction.action === 'block_source'
   const isIsolatePort = manualAction.action === 'isolate_port'
   const protocolOptions = isIsolatePort ? [] : MANUAL_PROTOCOL_OPTIONS
+  const showSwitchScopeToggle = isBlockFlow || isBlockSource
+  const useAllSwitches = showSwitchScopeToggle && manualAction.apply_all_switches
   return (
     <section className="section-stack">
       <section className="panel">
@@ -737,6 +742,7 @@ function MitigationSection({
                 action: event.target.value,
                 protocol: event.target.value === 'isolate_port' ? 'ALL' : prev.protocol || 'ALL',
                 port_id: event.target.value === 'isolate_port' ? 'ALL' : prev.port_id,
+                apply_all_switches: event.target.value === 'isolate_port' ? false : prev.apply_all_switches,
               }))
             }
           >
@@ -772,6 +778,16 @@ function MitigationSection({
               ))}
             </select>
           )}
+          {showSwitchScopeToggle && (
+            <label className="checkbox-row">
+              <span>Apply across all discovered switches</span>
+              <input
+                type="checkbox"
+                checked={manualAction.apply_all_switches}
+                onChange={(event) => setManualAction((prev) => ({ ...prev, apply_all_switches: event.target.checked }))}
+              />
+            </label>
+          )}
           {isIsolatePort && (
             <input
               placeholder="Switch ID (required for switch isolation)"
@@ -779,12 +795,15 @@ function MitigationSection({
               onChange={(event) => setManualAction((prev) => ({ ...prev, switch_id: event.target.value }))}
             />
           )}
-          {!isIsolatePort && (
+          {!isIsolatePort && !useAllSwitches && (
             <input
-              placeholder="Switch ID (required for isolate_port)"
+              placeholder="Switch ID override (optional for block actions)"
               value={manualAction.switch_id}
               onChange={(event) => setManualAction((prev) => ({ ...prev, switch_id: event.target.value }))}
             />
+          )}
+          {!isIsolatePort && useAllSwitches && (
+            <p className="empty-message">Rule will be enforced across all discovered switches (s1..sN).</p>
           )}
           {isIsolatePort && <p className="empty-message">Switch isolation will disable all data ports on this switch.</p>}
           <input
@@ -812,6 +831,7 @@ function MitigationSection({
                   <th>Source</th>
                   <th>Reason</th>
                   <th>Status</th>
+                  <th>Enforcement Detail</th>
                   <th>Rollback</th>
                 </tr>
               </thead>
@@ -823,6 +843,7 @@ function MitigationSection({
                     <td>{event.triggered_by}</td>
                     <td>{event.reason}</td>
                     <td>{event.status}</td>
+                    <td>{event.enforcement_message || 'n/a'}</td>
                     <td>
                       <button
                         className="btn tiny ghost"
@@ -857,6 +878,7 @@ function MitigationSection({
                   <th>Reason</th>
                   <th>Status</th>
                   <th>Enforcement</th>
+                  <th>Enforcement Detail</th>
                 </tr>
               </thead>
               <tbody>
@@ -869,6 +891,7 @@ function MitigationSection({
                     <td>{event.reason}</td>
                     <td>{event.status}</td>
                     <td>{event.enforcement_status}</td>
+                    <td>{event.enforcement_message || 'n/a'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -980,6 +1003,7 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
     protocol: 'ALL',
     switch_id: 's1',
     port_id: 'ALL',
+    apply_all_switches: true,
     reason: '',
     timeout_sec: 300,
   })
@@ -1156,7 +1180,9 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
         body: payload,
       })
       if (response.status === 'accepted') {
-        setActionMessage(`Mitigation enforced: ${response.event.target_summary}`)
+        setActionMessage(
+          `Mitigation enforced: ${response.event.target_summary}. ${response.event.enforcement_message || ''}`.trim(),
+        )
       } else {
         setActionMessage(`Mitigation failed: ${response.event.enforcement_message || 'enforcement error'}`)
       }
@@ -1428,12 +1454,18 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
       manualAction.action !== 'isolate_port'
         ? null
         : 0
+    const normalizedSwitchId =
+      manualAction.action === 'isolate_port'
+        ? manualAction.switch_id || null
+        : manualAction.apply_all_switches
+          ? null
+          : manualAction.switch_id || null
     await runManualMitigation({
       action: manualAction.action,
       src_ip: manualAction.action === 'isolate_port' ? null : manualAction.src_ip || null,
       dst_ip: manualAction.action === 'isolate_port' ? null : manualAction.dst_ip || null,
       protocol: normalizedProtocol,
-      switch_id: manualAction.switch_id || null,
+      switch_id: normalizedSwitchId,
       port_id: Number.isFinite(normalizedPortId) ? normalizedPortId : null,
       reason: manualAction.reason || 'Manual mitigation request from mitigation panel.',
       timeout_sec: Number(manualAction.timeout_sec) || mitigationDraft.default_timeout_sec,
