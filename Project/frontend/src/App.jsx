@@ -994,7 +994,7 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
     intensity: 5,
     packet_size: 1024,
     concurrency: 2,
-    use_real_helpers: true,
+    use_real_helpers: false,
   })
   const [manualAction, setManualAction] = useState({
     action: 'block_source',
@@ -1377,8 +1377,10 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
         },
       })
       const helperNote = response.helper_invoked
-        ? ` helper=${response.helper_output || 'executed'}`
-        : ` helper=${response.helper_output || 'not configured'}`
+        ? ` helper=real (${response.helper_output || 'executed'})`
+        : response.helper_requested
+          ? ` helper=requested but unavailable (${response.helper_output || 'synthetic fallback'})`
+          : ' helper=synthetic (real helper not requested)'
       setActionMessage(`${response.generated_events} scenario events generated for ${scenario}.${helperNote}`)
       await loadDashboardData()
     } catch (scenarioError) {

@@ -174,7 +174,7 @@ class ScenarioRunRequest(BaseModel):
     intensity: int = Field(default=1, ge=1, le=100)
     packet_size: int | None = Field(default=None, ge=64, le=65535)
     concurrency: int = Field(default=1, ge=1, le=64)
-    use_real_helpers: bool = True
+    use_real_helpers: bool = False
 
 
 class ScenarioRunResponse(BaseModel):
@@ -184,6 +184,7 @@ class ScenarioRunResponse(BaseModel):
     mode: ModeType
     message: str
     helper_invoked: bool = False
+    helper_requested: bool = False
     helper_output: str | None = None
 
 

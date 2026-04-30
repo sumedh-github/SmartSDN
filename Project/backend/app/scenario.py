@@ -137,10 +137,11 @@ class ScenarioService:
 
         source_hosts = self._normalize_source_hosts(request.source_hosts)
         destination_host = self._normalize_host(request.destination_host) if request.destination_host else "10.0.0.2"
+        helper_requested = bool(request.use_real_helpers)
         helper_invoked = False
         helper_output = None
 
-        if request.use_real_helpers:
+        if helper_requested:
             helper_invoked, helper_output = self._run_real_helper(request, source_hosts, destination_host)
 
         generated = 0
@@ -161,6 +162,7 @@ class ScenarioService:
                 generated += 1
         return {
             "generated_events": generated,
+            "helper_requested": helper_requested,
             "helper_invoked": helper_invoked,
             "helper_output": helper_output,
         }
@@ -219,7 +221,7 @@ class ScenarioService:
     ) -> tuple[bool, str | None]:
         helper_cmd = os.getenv("SOC_SCENARIO_HELPER_CMD", "").strip()
         if not helper_cmd:
-            return False, "No helper command configured (SOC_SCENARIO_HELPER_CMD unset)."
+            return False, "Real helper skipped (SOC_SCENARIO_HELPER_CMD unset); synthetic scenario events still generated."
 
         command = shlex.split(helper_cmd)
         command.extend(

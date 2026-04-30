@@ -376,6 +376,7 @@ def run_scenario(
         mode=mode_service.get_mode(),
         message="Scenario events generated in DEMO_SCENARIO mode.",
         helper_invoked=bool(result["helper_invoked"]),
+        helper_requested=bool(result["helper_requested"]),
         helper_output=result["helper_output"],
     )
 
