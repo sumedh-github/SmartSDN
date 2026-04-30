@@ -187,6 +187,10 @@ class ScenarioRunResponse(BaseModel):
     helper_invoked: bool = False
     helper_requested: bool = False
     helper_output: str | None = None
+    auto_mitigation_enabled: bool = False
+    auto_escalate_after_count: int = 1
+    auto_mitigations_applied: int = 0
+    auto_mitigations_failed: int = 0
 
 
 class ControllerStatusPayload(BaseModel):
@@ -213,7 +217,7 @@ class AutoMitigationConfig(BaseModel):
     action_order: list[MitigationActionType] = Field(
         default_factory=lambda: ["block_flow", "block_source", "isolate_port"]
     )
-    escalate_after_count: int = Field(default=3, ge=1, le=1000)
+    escalate_after_count: int = Field(default=1, ge=1, le=1000)
 
 
 class MitigationConfigUpdateRequest(BaseModel):

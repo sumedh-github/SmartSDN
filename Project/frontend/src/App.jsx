@@ -968,14 +968,14 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
     min_confidence: 0.75,
     default_timeout_sec: 300,
     action_order: ['block_flow', 'block_source', 'isolate_port'],
-    escalate_after_count: 3,
+    escalate_after_count: 1,
   })
   const [mitigationDraft, setMitigationDraft] = useState({
     enabled: false,
     min_confidence: 0.75,
     default_timeout_sec: 300,
     primary_action: 'block_flow',
-    escalate_after_count: 3,
+    escalate_after_count: 1,
   })
   const [mitigationDraftDirty, setMitigationDraftDirty] = useState(false)
   const [stats, setStats] = useState({
@@ -1082,7 +1082,7 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
           min_confidence: mitigationConfigData.min_confidence,
           default_timeout_sec: mitigationConfigData.default_timeout_sec,
           primary_action: mitigationConfigData.action_order?.[0] || 'block_flow',
-          escalate_after_count: mitigationConfigData.escalate_after_count || 3,
+          escalate_after_count: mitigationConfigData.escalate_after_count || 1,
         }))
       }
     }
@@ -1385,8 +1385,20 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
           ? ` helper=requested but unavailable (${response.helper_output || 'synthetic fallback'})`
           : ' helper=synthetic (real helper not requested)'
       const scenarioName = response.scenario || scenario
+      let autoMitigationNote = ''
+      if (response.auto_mitigation_enabled === false) {
+        autoMitigationNote = ' auto=disabled'
+      } else if (typeof response.auto_mitigations_triggered === 'number') {
+        if (response.auto_mitigations_triggered > 0) {
+          autoMitigationNote = ` auto=engaged(${response.auto_mitigations_triggered})`
+        } else {
+          autoMitigationNote = ` auto=not-triggered(threshold=${response.auto_escalate_after_count || 1})`
+        }
+      }
       if (requestSeq === scenarioRequestSeqRef.current) {
-        setActionMessage(`${response.generated_events} scenario events generated for ${scenarioName}.${helperNote}`)
+        setActionMessage(
+          `${response.generated_events} scenario events generated for ${scenarioName}.${helperNote}${autoMitigationNote}`,
+        )
       }
       await loadDashboardData()
     } catch (scenarioError) {
