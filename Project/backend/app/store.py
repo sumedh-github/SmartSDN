@@ -66,9 +66,11 @@ class EventStore:
         configured_vsctl = os.getenv("SOC_OVS_VSCTL_BIN", "ovs-vsctl")
         configured_ofctl = os.getenv("SOC_OVS_OFCTL_BIN", "ovs-ofctl")
         configured_ip = os.getenv("SOC_IP_BIN", "ip")
+        configured_mn = os.getenv("SOC_MININET_BIN", "mn")
         self._ovs_vsctl_bin = shutil.which(configured_vsctl) or configured_vsctl
         self._ovs_ofctl_bin = shutil.which(configured_ofctl) or configured_ofctl
         self._ip_bin = shutil.which(configured_ip) or configured_ip
+        self._mn_bin = shutil.which(configured_mn) or configured_mn
         self._of_proto = os.getenv("SOC_OVS_OPENFLOW_VERSION", "OpenFlow13")
         self._prefer_sudo = os.getenv("SOC_OVS_USE_SUDO", "false").strip().lower() == "true"
         self._static_physical_topology = self._parse_static_physical_topology(
@@ -547,6 +549,9 @@ class EventStore:
         if not self._physical_topology_enabled:
             return self._static_physical_topology
         self._last_topology_discovery_error = None
+        mininet_topology = self._discover_topology_from_mininet_net()
+        if mininet_topology is not None:
+            return mininet_topology
         try:
             switches_output = self._run_command([self._ovs_vsctl_bin, "list-br"])
             switches = sorted(line.strip() for line in switches_output.splitlines() if line.strip())
@@ -557,16 +562,21 @@ class EventStore:
             host_edges: dict[str, str] = {}
             host_links: dict[tuple[str, str], bool] = {}
             switch_links: dict[tuple[str, str], bool] = {}
+            unresolved_host_ports: list[tuple[str, str, bool]] = []
 
             for switch_id in switches:
                 ports_output = self._run_command([self._ovs_vsctl_bin, "list-ports", switch_id])
                 ports = [line.strip() for line in ports_output.splitlines() if line.strip()]
                 port_state = self._discover_switch_port_state(switch_id)
                 for port_name in ports:
-                    peer_name = peer_map.get(port_name)
-                    if not peer_name:
+                    if port_name == switch_id:
+                        # Skip bridge-local internal interface.
                         continue
+                    peer_name = peer_map.get(port_name)
                     port_up = port_state.get(port_name, True)
+                    if not peer_name:
+                        unresolved_host_ports.append((switch_id, port_name, port_up))
+                        continue
 
                     host_name_match = re.match(r"^(h\d+)-eth\d+$", peer_name)
                     if host_name_match:
@@ -584,6 +594,20 @@ class EventStore:
                         key = tuple(sorted((switch_id, peer_switch)))
                         switch_links[key] = switch_links.get(key, True) and port_up
 
+            if unresolved_host_ports:
+                existing_hosts = set(host_edges.keys())
+                for switch_id, port_name, port_up in sorted(
+                    unresolved_host_ports,
+                    key=lambda item: (item[0], self._port_index_from_name(item[1]), item[1]),
+                ):
+                    host_ip = self._infer_host_ip_from_switch_port(port_name)
+                    if host_ip is None or host_ip in existing_hosts:
+                        host_ip = self._allocate_host_ip(existing_hosts)
+                    host_edges.setdefault(host_ip, switch_id)
+                    key = (switch_id, host_ip)
+                    host_links[key] = host_links.get(key, True) and port_up
+                    existing_hosts.add(host_ip)
+
             return {
                 "source": "dynamic",
                 "switches": switches,
@@ -594,6 +618,97 @@ class EventStore:
         except Exception as exc:
             self._last_topology_discovery_error = str(exc)
             return self._static_physical_topology
+
+    def _discover_topology_from_mininet_net(self) -> dict[str, object] | None:
+        command = os.getenv("SOC_MININET_NET_CMD", "").strip()
+        if command:
+            try:
+                output = self._run_command(command.split())
+                parsed = self._parse_mininet_net_output(output)
+                if parsed is not None:
+                    return parsed
+            except Exception as exc:
+                self._last_topology_discovery_error = f"mininet_net_cmd failed: {exc}"
+        return None
+
+    def _parse_mininet_net_output(self, output: str) -> dict[str, object] | None:
+        host_edges: dict[str, str] = {}
+        host_links: dict[tuple[str, str], bool] = {}
+        switch_links: dict[tuple[str, str], bool] = {}
+        switches: set[str] = set()
+        host_name_to_ip: dict[str, str] = {}
+        fallback_host_counter = 1
+
+        def host_ip(host_name: str) -> str:
+            nonlocal fallback_host_counter
+            if host_name in host_name_to_ip:
+                return host_name_to_ip[host_name]
+            mapped = self._host_name_to_ip(host_name)
+            if mapped == host_name:
+                mapped = f"10.0.0.{fallback_host_counter}"
+                fallback_host_counter += 1
+            host_name_to_ip[host_name] = mapped
+            return mapped
+
+        host_line = re.compile(r"^\s*(h\d+)\s+(\S+):(\S+)")
+        switch_line = re.compile(r"^\s*(s\d+)\s+.+$")
+        host_peer = re.compile(r"^(h\d+)-eth\d+$")
+        switch_peer = re.compile(r"^(s\d+)-eth\d+$")
+
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            host_match = host_line.match(line)
+            if host_match:
+                host_name = host_match.group(1)
+                peer_name = host_match.group(3)
+                peer_switch_match = switch_peer.match(peer_name)
+                if peer_switch_match:
+                    switch_id = peer_switch_match.group(1)
+                    ip = host_ip(host_name)
+                    switches.add(switch_id)
+                    host_edges[ip] = switch_id
+                    host_links[(switch_id, ip)] = True
+                continue
+
+            switch_match = switch_line.match(line)
+            if not switch_match:
+                continue
+            switch_id = switch_match.group(1)
+            switches.add(switch_id)
+            peers = re.findall(r"\S+:\S+", line)
+            for peer_entry in peers:
+                if ":" not in peer_entry:
+                    continue
+                _, right = peer_entry.split(":", 1)
+                right = right.strip()
+                peer_switch_match = switch_peer.match(right)
+                if peer_switch_match:
+                    peer_switch = peer_switch_match.group(1)
+                    if peer_switch == switch_id:
+                        continue
+                    switches.add(peer_switch)
+                    key = tuple(sorted((switch_id, peer_switch)))
+                    switch_links[key] = True
+                    continue
+                peer_host_match = host_peer.match(right)
+                if peer_host_match:
+                    host_name = peer_host_match.group(1)
+                    ip = host_ip(host_name)
+                    host_edges.setdefault(ip, switch_id)
+                    host_links[(switch_id, ip)] = True
+
+        if not switches:
+            return None
+
+        return {
+            "source": "mininet_net",
+            "switches": sorted(switches),
+            "host_edges": host_edges,
+            "host_links": host_links,
+            "switch_links": switch_links,
+        }
 
     def _parse_static_physical_topology(self, raw: str) -> dict[str, object] | None:
         if not raw:
@@ -708,6 +823,50 @@ class EventStore:
             if 1 <= host_index <= 254:
                 return f"10.0.0.{host_index}"
         return host_name
+
+    def _infer_host_ip_from_switch_port(self, port_name: str) -> str | None:
+        # Prefer Mininet metadata when available.
+        try:
+            output = self._run_command([self._ovs_vsctl_bin, "--if-exists", "get", "Interface", port_name, "external_ids"])
+            attached_match = re.search(r"attached-mac=\"([0-9a-fA-F:]{17})\"", output)
+            if attached_match:
+                inferred = self._host_ip_from_mac(attached_match.group(1))
+                if inferred:
+                    return inferred
+        except Exception:
+            pass
+
+        # Common Mininet naming fallback: hN-eth0 peers to sX-ethY in host order.
+        port_index = self._port_index_from_name(port_name)
+        if port_index > 0:
+            candidate = f"10.0.0.{port_index}"
+            return candidate
+        return None
+
+    def _host_ip_from_mac(self, mac: str) -> str | None:
+        try:
+            parts = [int(part, 16) for part in mac.strip().split(":")]
+        except ValueError:
+            return None
+        if len(parts) != 6:
+            return None
+        host_index = parts[-1]
+        if 1 <= host_index <= 254:
+            return f"10.0.0.{host_index}"
+        return None
+
+    def _allocate_host_ip(self, existing_hosts: set[str]) -> str:
+        for host_index in range(1, 255):
+            candidate = f"10.0.0.{host_index}"
+            if candidate not in existing_hosts:
+                return candidate
+        return f"host-{len(existing_hosts) + 1}"
+
+    def _port_index_from_name(self, port_name: str) -> int:
+        match = re.search(r"eth(\d+)$", port_name)
+        if not match:
+            return 0
+        return int(match.group(1))
 
     def _run_command(self, command: list[str]) -> str:
         proc = subprocess.run(command, check=False, capture_output=True, text=True)
