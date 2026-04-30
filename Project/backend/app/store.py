@@ -4,11 +4,6 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
-import json
-import os
-import re
-import shutil
-import subprocess
 from threading import RLock
 from typing import Callable
 
@@ -60,23 +55,6 @@ class EventStore:
         self._mitigation_events: list[MitigationEvent] = []
         self._active_mitigations: dict[str, MitigationEvent] = {}
         self._max_mitigation_events = max_mitigation_events
-        self._physical_topology_enabled = (
-            os.getenv("SOC_PHYSICAL_TOPOLOGY_ENABLED", "true").strip().lower() == "true"
-        )
-        configured_vsctl = os.getenv("SOC_OVS_VSCTL_BIN", "ovs-vsctl")
-        configured_ofctl = os.getenv("SOC_OVS_OFCTL_BIN", "ovs-ofctl")
-        configured_ip = os.getenv("SOC_IP_BIN", "ip")
-        configured_mn = os.getenv("SOC_MININET_BIN", "mn")
-        self._ovs_vsctl_bin = shutil.which(configured_vsctl) or configured_vsctl
-        self._ovs_ofctl_bin = shutil.which(configured_ofctl) or configured_ofctl
-        self._ip_bin = shutil.which(configured_ip) or configured_ip
-        self._mn_bin = shutil.which(configured_mn) or configured_mn
-        self._of_proto = os.getenv("SOC_OVS_OPENFLOW_VERSION", "OpenFlow13")
-        self._prefer_sudo = os.getenv("SOC_OVS_USE_SUDO", "false").strip().lower() == "true"
-        self._static_physical_topology = self._parse_static_physical_topology(
-            os.getenv("SOC_STATIC_PHYSICAL_TOPOLOGY_JSON", "").strip()
-        )
-        self._last_topology_discovery_error: str | None = None
 
     def add_event(self, event: FlowEvent) -> FlowEvent:
         with self._lock:
@@ -312,13 +290,7 @@ class EventStore:
             active_mitigations = list(self._active_mitigations.values())
         controller_status = self.controller_status()
 
-        physical_topology = self._discover_physical_topology()
-        physical_switch_ids = set(physical_topology["switches"]) if physical_topology else set()
-        controller_switch_ids = {
-            f"s{index}" for index in range(1, max(0, int(controller_status.datapath_count)) + 1)
-        }
-        event_switch_ids = {event.switch_id or "s1" for event in events}
-        switch_ids = sorted(physical_switch_ids | controller_switch_ids | event_switch_ids or {"s1"})
+        switch_ids = sorted({event.switch_id or "s1" for event in events} or {"s1"})
         nodes: list[TopologyNode] = [
             TopologyNode(
                 id=CONTROLLER_NODE_ID,
@@ -331,8 +303,6 @@ class EventStore:
                     "mode": controller_status.mode,
                     "datapath_count": controller_status.datapath_count,
                     "stale": controller_status.stale,
-                    "topology_source": physical_topology["source"] if physical_topology else "inferred",
-                    "topology_discovery_error": self._last_topology_discovery_error,
                 },
             )
         ]
@@ -348,51 +318,21 @@ class EventStore:
                 )
             )
 
-        physical_host_edges = physical_topology["host_edges"] if physical_topology else {}
-        physical_host_links = physical_topology["host_links"] if physical_topology else {}
-        physical_switch_links = physical_topology["switch_links"] if physical_topology else {}
-
-        host_ips = sorted(
-            ({event.src_ip for event in events} | {event.dst_ip for event in events}) | set(physical_host_edges.keys())
-        )
+        host_ips = sorted({event.src_ip for event in events} | {event.dst_ip for event in events})
         blocked_sources = {mitigation.src_ip for mitigation in active_mitigations if mitigation.action == "block_source"}
-        isolated_switches = {
-            mitigation.switch_id or "s1"
+        isolated_sources = {
+            mitigation.src_ip
             for mitigation in active_mitigations
-            if mitigation.action == "isolate_port"
+            if mitigation.action == "isolate_port" and mitigation.src_ip
         }
-
-        # Infer a single edge switch per host from observed traffic, so hosts
-        # are not rendered as attached to every transit switch they pass through.
-        host_switch_votes: dict[str, Counter[str]] = defaultdict(Counter)
-        for event in events:
-            switch_id = event.switch_id or "s1"
-            host_switch_votes[event.src_ip][switch_id] += 2
-            host_switch_votes[event.dst_ip][switch_id] += 1
-        host_home_switch: dict[str, str] = {}
         for ip in host_ips:
-            if ip in physical_host_edges:
-                host_home_switch[ip] = physical_host_edges[ip]
-                continue
-            votes = host_switch_votes.get(ip)
-            if votes:
-                host_home_switch[ip] = sorted(votes.items(), key=lambda item: (item[1], item[0]), reverse=True)[0][0]
-            else:
-                host_home_switch[ip] = switch_ids[0]
-
-        for ip in host_ips:
-            home_switch = host_home_switch[ip]
             nodes.append(
                 TopologyNode(
                     id=_host_node_id(ip),
                     kind="host",
                     label=ip,
-                    status="mitigated" if ip in blocked_sources or home_switch in isolated_switches else "active",
-                    metadata={
-                        "ip": ip,
-                        "edge_switch": home_switch,
-                        "edge_switch_source": "physical" if ip in physical_host_edges else "inferred",
-                    },
+                    status="mitigated" if ip in blocked_sources or ip in isolated_sources else "active",
+                    metadata={"ip": ip},
                 )
             )
 
@@ -410,90 +350,43 @@ class EventStore:
                 )
             )
 
-        switch_link_stats: dict[tuple[str, str], dict[str, int | str]] = {}
-        for (left_switch, right_switch), is_up in physical_switch_links.items():
-            switch_link_stats[(left_switch, right_switch)] = {
-                "state": "normal" if is_up else "disabled",
-                "flow_count": 0,
-                "packet_count": 0,
-                "byte_count": 0,
-            }
-        for event in events:
-            src_switch = host_home_switch.get(event.src_ip)
-            dst_switch = host_home_switch.get(event.dst_ip)
-            if not src_switch or not dst_switch or src_switch == dst_switch:
-                continue
-            key = tuple(sorted((src_switch, dst_switch)))
-            if key not in switch_link_stats:
-                switch_link_stats[key] = {
-                    "state": "idle",
-                    "flow_count": 0,
-                    "packet_count": 0,
-                    "byte_count": 0,
-                }
-            stats = switch_link_stats[key]
-            stats["flow_count"] = int(stats["flow_count"]) + 1
-            stats["packet_count"] = int(stats["packet_count"]) + event.packet_count
-            stats["byte_count"] = int(stats["byte_count"]) + event.byte_count
-            if src_switch in isolated_switches or dst_switch in isolated_switches:
-                stats["state"] = "disabled"
-            elif stats["state"] == "disabled":
-                continue
-            elif event.mitigation_state == "blocked":
-                stats["state"] = "blocked"
-            elif _is_suspicious(event.prediction) and stats["state"] != "blocked":
-                stats["state"] = "suspicious"
-            elif stats["state"] == "idle":
-                stats["state"] = "normal"
-        for (left_switch, right_switch), stats in switch_link_stats.items():
-            links.append(
-                TopologyLink(
-                    id=f"{left_switch}--{right_switch}",
-                    source=left_switch,
-                    target=right_switch,
-                    state=stats["state"],
-                    flow_count=int(stats["flow_count"]),
-                    packet_count=int(stats["packet_count"]),
-                    byte_count=int(stats["byte_count"]),
-                )
-            )
+        isolated_switches = {
+            mitigation.switch_id or "s1"
+            for mitigation in active_mitigations
+            if mitigation.action == "isolate_port" and mitigation.src_ip is None
+        }
+        isolated_host_pairs = {
+            ((mitigation.switch_id or "s1"), mitigation.src_ip)
+            for mitigation in active_mitigations
+            if mitigation.action == "isolate_port" and mitigation.src_ip is not None
+        }
 
         host_link_stats: dict[tuple[str, str], dict[str, int | str]] = {}
-        for ip in host_ips:
-            switch_id = host_home_switch[ip]
-            host_id = _host_node_id(ip)
-            physically_up = physical_host_links.get((switch_id, ip), True)
-            host_link_stats[(switch_id, host_id)] = {
-                "state": (
-                    "disabled"
-                    if switch_id in isolated_switches or not physically_up
-                    else "blocked"
-                    if ip in blocked_sources
-                    else "idle"
-                ),
-                "flow_count": 0,
-                "packet_count": 0,
-                "byte_count": 0,
-            }
         for event in events:
+            switch_id = event.switch_id or "s1"
             for ip in (event.src_ip, event.dst_ip):
-                switch_id = host_home_switch.get(ip)
-                if not switch_id:
-                    continue
                 host_id = _host_node_id(ip)
-                stats = host_link_stats[(switch_id, host_id)]
+                key = (switch_id, host_id)
+                if key not in host_link_stats:
+                    host_link_stats[key] = {
+                        "state": "idle",
+                        "flow_count": 0,
+                        "packet_count": 0,
+                        "byte_count": 0,
+                    }
+                stats = host_link_stats[key]
                 stats["flow_count"] = int(stats["flow_count"]) + 1
                 stats["packet_count"] = int(stats["packet_count"]) + event.packet_count
                 stats["byte_count"] = int(stats["byte_count"]) + event.byte_count
-                physically_up = physical_host_links.get((switch_id, ip), True)
-                if switch_id in isolated_switches or not physically_up:
+                if switch_id in isolated_switches or (switch_id, ip) in isolated_host_pairs or ip in isolated_sources:
                     stats["state"] = "disabled"
-                elif ip in blocked_sources or event.mitigation_state == "blocked":
+                elif event.mitigation_state == "blocked":
                     stats["state"] = "blocked"
-                elif _is_suspicious(event.prediction) and stats["state"] not in {"blocked", "disabled"}:
+                elif _is_suspicious(event.prediction) and stats["state"] != "blocked":
                     stats["state"] = "suspicious"
                 elif stats["state"] == "idle":
                     stats["state"] = "normal"
+
         for (switch_id, host_id), stats in host_link_stats.items():
             links.append(
                 TopologyLink(
@@ -544,347 +437,6 @@ class EventStore:
             links=links,
             traffic_edges=traffic_edges,
         )
-
-    def _discover_physical_topology(self) -> dict[str, object] | None:
-        if not self._physical_topology_enabled:
-            return self._static_physical_topology
-        self._last_topology_discovery_error = None
-        mininet_topology = self._discover_topology_from_mininet_net()
-        if mininet_topology is not None:
-            return mininet_topology
-        try:
-            switches_output = self._run_command([self._ovs_vsctl_bin, "list-br"])
-            switches = sorted(line.strip() for line in switches_output.splitlines() if line.strip())
-            if not switches:
-                return self._static_physical_topology
-
-            peer_map = self._discover_peer_interfaces()
-            host_edges: dict[str, str] = {}
-            host_links: dict[tuple[str, str], bool] = {}
-            switch_links: dict[tuple[str, str], bool] = {}
-            unresolved_host_ports: list[tuple[str, str, bool]] = []
-
-            for switch_id in switches:
-                ports_output = self._run_command([self._ovs_vsctl_bin, "list-ports", switch_id])
-                ports = [line.strip() for line in ports_output.splitlines() if line.strip()]
-                port_state = self._discover_switch_port_state(switch_id)
-                for port_name in ports:
-                    if port_name == switch_id:
-                        # Skip bridge-local internal interface.
-                        continue
-                    peer_name = peer_map.get(port_name)
-                    port_up = port_state.get(port_name, True)
-                    if not peer_name:
-                        unresolved_host_ports.append((switch_id, port_name, port_up))
-                        continue
-
-                    host_name_match = re.match(r"^(h\d+)-eth\d+$", peer_name)
-                    if host_name_match:
-                        host_ip = self._host_name_to_ip(host_name_match.group(1))
-                        host_edges.setdefault(host_ip, switch_id)
-                        key = (switch_id, host_ip)
-                        host_links[key] = host_links.get(key, True) and port_up
-                        continue
-
-                    peer_switch_match = re.match(r"^(s\d+)-eth\d+$", peer_name)
-                    if peer_switch_match:
-                        peer_switch = peer_switch_match.group(1)
-                        if peer_switch == switch_id:
-                            continue
-                        key = tuple(sorted((switch_id, peer_switch)))
-                        switch_links[key] = switch_links.get(key, True) and port_up
-
-            if unresolved_host_ports:
-                existing_hosts = set(host_edges.keys())
-                for switch_id, port_name, port_up in sorted(
-                    unresolved_host_ports,
-                    key=lambda item: (item[0], self._port_index_from_name(item[1]), item[1]),
-                ):
-                    host_ip = self._infer_host_ip_from_switch_port(port_name)
-                    if host_ip is None or host_ip in existing_hosts:
-                        host_ip = self._allocate_host_ip(existing_hosts)
-                    host_edges.setdefault(host_ip, switch_id)
-                    key = (switch_id, host_ip)
-                    host_links[key] = host_links.get(key, True) and port_up
-                    existing_hosts.add(host_ip)
-
-            return {
-                "source": "dynamic",
-                "switches": switches,
-                "host_edges": host_edges,
-                "host_links": host_links,
-                "switch_links": switch_links,
-            }
-        except Exception as exc:
-            self._last_topology_discovery_error = str(exc)
-            return self._static_physical_topology
-
-    def _discover_topology_from_mininet_net(self) -> dict[str, object] | None:
-        command = os.getenv("SOC_MININET_NET_CMD", "").strip()
-        if command:
-            try:
-                output = self._run_command(command.split())
-                parsed = self._parse_mininet_net_output(output)
-                if parsed is not None:
-                    return parsed
-            except Exception as exc:
-                self._last_topology_discovery_error = f"mininet_net_cmd failed: {exc}"
-        return None
-
-    def _parse_mininet_net_output(self, output: str) -> dict[str, object] | None:
-        host_edges: dict[str, str] = {}
-        host_links: dict[tuple[str, str], bool] = {}
-        switch_links: dict[tuple[str, str], bool] = {}
-        switches: set[str] = set()
-        host_name_to_ip: dict[str, str] = {}
-        fallback_host_counter = 1
-
-        def host_ip(host_name: str) -> str:
-            nonlocal fallback_host_counter
-            if host_name in host_name_to_ip:
-                return host_name_to_ip[host_name]
-            mapped = self._host_name_to_ip(host_name)
-            if mapped == host_name:
-                mapped = f"10.0.0.{fallback_host_counter}"
-                fallback_host_counter += 1
-            host_name_to_ip[host_name] = mapped
-            return mapped
-
-        host_line = re.compile(r"^\s*(h\d+)\s+(\S+):(\S+)")
-        switch_line = re.compile(r"^\s*(s\d+)\s+.+$")
-        host_peer = re.compile(r"^(h\d+)-eth\d+$")
-        switch_peer = re.compile(r"^(s\d+)-eth\d+$")
-
-        for raw_line in output.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            host_match = host_line.match(line)
-            if host_match:
-                host_name = host_match.group(1)
-                peer_name = host_match.group(3)
-                peer_switch_match = switch_peer.match(peer_name)
-                if peer_switch_match:
-                    switch_id = peer_switch_match.group(1)
-                    ip = host_ip(host_name)
-                    switches.add(switch_id)
-                    host_edges[ip] = switch_id
-                    host_links[(switch_id, ip)] = True
-                continue
-
-            switch_match = switch_line.match(line)
-            if not switch_match:
-                continue
-            switch_id = switch_match.group(1)
-            switches.add(switch_id)
-            peers = re.findall(r"\S+:\S+", line)
-            for peer_entry in peers:
-                if ":" not in peer_entry:
-                    continue
-                _, right = peer_entry.split(":", 1)
-                right = right.strip()
-                peer_switch_match = switch_peer.match(right)
-                if peer_switch_match:
-                    peer_switch = peer_switch_match.group(1)
-                    if peer_switch == switch_id:
-                        continue
-                    switches.add(peer_switch)
-                    key = tuple(sorted((switch_id, peer_switch)))
-                    switch_links[key] = True
-                    continue
-                peer_host_match = host_peer.match(right)
-                if peer_host_match:
-                    host_name = peer_host_match.group(1)
-                    ip = host_ip(host_name)
-                    host_edges.setdefault(ip, switch_id)
-                    host_links[(switch_id, ip)] = True
-
-        if not switches:
-            return None
-
-        return {
-            "source": "mininet_net",
-            "switches": sorted(switches),
-            "host_edges": host_edges,
-            "host_links": host_links,
-            "switch_links": switch_links,
-        }
-
-    def _parse_static_physical_topology(self, raw: str) -> dict[str, object] | None:
-        if not raw:
-            return None
-        try:
-            payload = json.loads(raw)
-        except Exception:
-            return None
-        if not isinstance(payload, dict):
-            return None
-
-        switches_raw = payload.get("switches", [])
-        host_edges_raw = payload.get("host_edges", {})
-        switch_links_raw = payload.get("switch_links", [])
-        if not isinstance(switches_raw, list) or not isinstance(host_edges_raw, dict):
-            return None
-
-        switches = sorted(
-            value.strip()
-            for value in switches_raw
-            if isinstance(value, str) and value.strip()
-        )
-        host_edges: dict[str, str] = {}
-        host_links: dict[tuple[str, str], bool] = {}
-        for host_ip, switch_id in host_edges_raw.items():
-            if not isinstance(host_ip, str) or not isinstance(switch_id, str):
-                continue
-            host_key = host_ip.strip()
-            switch_key = switch_id.strip()
-            if not host_key or not switch_key:
-                continue
-            host_edges[host_key] = switch_key
-            host_links[(switch_key, host_key)] = True
-
-        switch_links: dict[tuple[str, str], bool] = {}
-        if isinstance(switch_links_raw, list):
-            for edge in switch_links_raw:
-                if (
-                    isinstance(edge, list)
-                    and len(edge) == 2
-                    and all(isinstance(value, str) and value.strip() for value in edge)
-                ):
-                    left, right = sorted([edge[0].strip(), edge[1].strip()])
-                    if left != right:
-                        switch_links[(left, right)] = True
-
-        if not switches:
-            switches = sorted(set(host_edges.values()) | {node for pair in switch_links for node in pair})
-        if not switches:
-            return None
-
-        return {
-            "source": "static",
-            "switches": switches,
-            "host_edges": host_edges,
-            "host_links": host_links,
-            "switch_links": switch_links,
-        }
-
-    def _discover_peer_interfaces(self) -> dict[str, str]:
-        output = self._run_command([self._ip_bin, "-o", "link"])
-        index_to_name: dict[int, str] = {}
-        name_to_peer_index: dict[str, int] = {}
-        for line in output.splitlines():
-            match = re.match(r"^\s*(\d+):\s+([^:]+):", line)
-            if not match:
-                continue
-            index = int(match.group(1))
-            name_field = match.group(2).strip()
-            if "@if" in name_field:
-                name, peer_fragment = name_field.split("@if", 1)
-                peer_match = re.match(r"(\d+)", peer_fragment)
-                if peer_match:
-                    name_to_peer_index[name] = int(peer_match.group(1))
-            else:
-                name = name_field
-            index_to_name[index] = name
-
-        peer_map: dict[str, str] = {}
-        for name, peer_index in name_to_peer_index.items():
-            peer_name = index_to_name.get(peer_index)
-            if peer_name:
-                peer_map[name] = peer_name
-        return peer_map
-
-    def _discover_switch_port_state(self, switch_id: str) -> dict[str, bool]:
-        output = self._run_command([self._ovs_ofctl_bin, "-O", self._of_proto, "dump-ports-desc", switch_id])
-        port_state: dict[str, bool] = {}
-        current_port: str | None = None
-        for line in output.splitlines():
-            header_match = re.match(r"^\s*\d+\(([^)]+)\):", line)
-            if header_match:
-                current_port = header_match.group(1).strip()
-                port_state[current_port] = True
-                continue
-            if not current_port:
-                continue
-            if "config:" in line:
-                config_text = line.split("config:", 1)[1].upper()
-                if "PORT_DOWN" in config_text:
-                    port_state[current_port] = False
-            if "state:" in line:
-                state_text = line.split("state:", 1)[1].upper()
-                if "LINK_DOWN" in state_text or "PORT_DOWN" in state_text:
-                    port_state[current_port] = False
-        return port_state
-
-    def _host_name_to_ip(self, host_name: str) -> str:
-        match = re.match(r"^h(\d+)$", host_name)
-        if match:
-            host_index = int(match.group(1))
-            if 1 <= host_index <= 254:
-                return f"10.0.0.{host_index}"
-        return host_name
-
-    def _infer_host_ip_from_switch_port(self, port_name: str) -> str | None:
-        # Prefer Mininet metadata when available.
-        try:
-            output = self._run_command([self._ovs_vsctl_bin, "--if-exists", "get", "Interface", port_name, "external_ids"])
-            attached_match = re.search(r"attached-mac=\"([0-9a-fA-F:]{17})\"", output)
-            if attached_match:
-                inferred = self._host_ip_from_mac(attached_match.group(1))
-                if inferred:
-                    return inferred
-        except Exception:
-            pass
-
-        # Common Mininet naming fallback: hN-eth0 peers to sX-ethY in host order.
-        port_index = self._port_index_from_name(port_name)
-        if port_index > 0:
-            candidate = f"10.0.0.{port_index}"
-            return candidate
-        return None
-
-    def _host_ip_from_mac(self, mac: str) -> str | None:
-        try:
-            parts = [int(part, 16) for part in mac.strip().split(":")]
-        except ValueError:
-            return None
-        if len(parts) != 6:
-            return None
-        host_index = parts[-1]
-        if 1 <= host_index <= 254:
-            return f"10.0.0.{host_index}"
-        return None
-
-    def _allocate_host_ip(self, existing_hosts: set[str]) -> str:
-        for host_index in range(1, 255):
-            candidate = f"10.0.0.{host_index}"
-            if candidate not in existing_hosts:
-                return candidate
-        return f"host-{len(existing_hosts) + 1}"
-
-    def _port_index_from_name(self, port_name: str) -> int:
-        match = re.search(r"eth(\d+)$", port_name)
-        if not match:
-            return 0
-        return int(match.group(1))
-
-    def _run_command(self, command: list[str]) -> str:
-        proc = subprocess.run(command, check=False, capture_output=True, text=True)
-        if proc.returncode == 0:
-            return proc.stdout or ""
-
-        stderr = (proc.stderr or "").strip()
-        if "permission denied" in stderr.lower() and self._prefer_sudo and shutil.which("sudo"):
-            sudo_proc = subprocess.run(["sudo", "-n", *command], check=False, capture_output=True, text=True)
-            if sudo_proc.returncode == 0:
-                return sudo_proc.stdout or ""
-            sudo_stderr = (sudo_proc.stderr or "").strip()
-            raise RuntimeError(
-                f"{' '.join(command)} failed ({proc.returncode}): {stderr}. "
-                f"Sudo fallback failed: {sudo_stderr}"
-            )
-
-        raise RuntimeError(f"{' '.join(command)} failed ({proc.returncode}): {stderr or 'unknown error'}")
 
     def stats(self) -> dict[str, object]:
         with self._lock:
