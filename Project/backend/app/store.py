@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import os
+import re
+import shlex
+import subprocess
 from threading import RLock
 from typing import Callable
 
@@ -170,7 +174,16 @@ class EventStore:
             events = list(self._events)
         controller_status = self.controller_status()
 
-        switch_ids = sorted({event.switch_id or "s1" for event in events} or {"s1"})
+        discovered_topology = self._discover_topology_from_mininet_net()
+        discovered_host_edges: dict[str, str] = {}
+        discovered_switch_links: set[tuple[str, str]] = set()
+        if discovered_topology is not None:
+            switch_ids = discovered_topology["switches"]
+            discovered_host_edges = discovered_topology["host_edges"]
+            discovered_switch_links = discovered_topology["switch_links"]
+        else:
+            switch_ids = sorted({event.switch_id or "s1" for event in events} or {"s1"})
+
         nodes: list[TopologyNode] = [
             TopologyNode(
                 id=CONTROLLER_NODE_ID,
@@ -198,7 +211,11 @@ class EventStore:
                 )
             )
 
-        host_ips = sorted({event.src_ip for event in events} | {event.dst_ip for event in events})
+        host_ips = sorted(
+            {event.src_ip for event in events}
+            | {event.dst_ip for event in events}
+            | set(discovered_host_edges.keys())
+        )
         for ip in host_ips:
             nodes.append(
                 TopologyNode(
@@ -224,7 +241,29 @@ class EventStore:
                 )
             )
 
+        for left_switch, right_switch in sorted(discovered_switch_links):
+            links.append(
+                TopologyLink(
+                    id=f"{left_switch}--{right_switch}",
+                    source=left_switch,
+                    target=right_switch,
+                    state="normal" if controller_status.running else "idle",
+                    flow_count=0,
+                    packet_count=0,
+                    byte_count=0,
+                )
+            )
+
         host_link_stats: dict[tuple[str, str], dict[str, int | str]] = {}
+        for host_ip, switch_id in discovered_host_edges.items():
+            key = (switch_id, _host_node_id(host_ip))
+            host_link_stats[key] = {
+                "state": "normal" if controller_status.running else "idle",
+                "flow_count": 0,
+                "packet_count": 0,
+                "byte_count": 0,
+            }
+
         for event in events:
             switch_id = event.switch_id or "s1"
             for ip in (event.src_ip, event.dst_ip):
@@ -370,6 +409,94 @@ class EventStore:
             if self._event_matches_mitigation(event, mitigation):
                 return "blocked"
         return "none"
+
+    def _discover_topology_from_mininet_net(self) -> dict[str, object] | None:
+        command = os.getenv("SOC_MININET_NET_CMD", "").strip()
+        if not command:
+            return None
+        try:
+            output = self._run_command(command)
+            return self._parse_mininet_net_output(output)
+        except Exception:
+            return None
+
+    def _parse_mininet_net_output(self, output: str) -> dict[str, object] | None:
+        host_edges: dict[str, str] = {}
+        switch_links: set[tuple[str, str]] = set()
+        switches: set[str] = set()
+
+        host_line = re.compile(r"^\s*(h\d+)\s+(\S+):(\S+)\s*$")
+        switch_line = re.compile(r"^\s*(s\d+)\s+.+$")
+        host_peer = re.compile(r"^(h\d+)-eth\d+$")
+        switch_peer = re.compile(r"^(s\d+)-eth\d+$")
+
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            host_match = host_line.match(line)
+            if host_match:
+                host_name = host_match.group(1)
+                peer_name = host_match.group(3)
+                peer_switch_match = switch_peer.match(peer_name)
+                if peer_switch_match:
+                    switch_id = peer_switch_match.group(1)
+                    switches.add(switch_id)
+                    host_edges[self._host_name_to_ip(host_name)] = switch_id
+                continue
+
+            switch_match = switch_line.match(line)
+            if not switch_match:
+                continue
+
+            switch_id = switch_match.group(1)
+            switches.add(switch_id)
+            for peer_entry in re.findall(r"\S+:\S+", line):
+                _, right = peer_entry.split(":", 1)
+                right = right.strip()
+                peer_switch_match = switch_peer.match(right)
+                if peer_switch_match:
+                    peer_switch = peer_switch_match.group(1)
+                    if peer_switch != switch_id:
+                        switches.add(peer_switch)
+                        switch_links.add(tuple(sorted((switch_id, peer_switch))))
+                    continue
+                peer_host_match = host_peer.match(right)
+                if peer_host_match:
+                    host_name = peer_host_match.group(1)
+                    host_edges.setdefault(self._host_name_to_ip(host_name), switch_id)
+
+        if not switches:
+            return None
+
+        return {
+            "switches": sorted(switches),
+            "host_edges": host_edges,
+            "switch_links": switch_links,
+        }
+
+    def _run_command(self, command: str) -> str:
+        command_args = shlex.split(command)
+        if not command_args:
+            raise ValueError("Command cannot be empty.")
+        completed = subprocess.run(
+            command_args,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if completed.returncode != 0:
+            message = completed.stderr.strip() or completed.stdout.strip() or "Unknown command failure."
+            raise RuntimeError(message)
+        return completed.stdout
+
+    def _host_name_to_ip(self, host_name: str) -> str:
+        match = re.match(r"^h(\d+)$", host_name.lower())
+        if match:
+            return f"10.0.0.{int(match.group(1))}"
+        return host_name
 
     def _event_matches_mitigation(self, event: FlowEvent, mitigation: MitigationEvent) -> bool:
         if mitigation.action == "block_flow" and mitigation.flow_key:
