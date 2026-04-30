@@ -26,6 +26,7 @@ class MitigationService:
         self._config = AutoMitigationConfig()
         self._automatic_hit_counter: dict[str, int] = defaultdict(int)
         self._automatic_last_trigger_count: dict[str, int] = defaultdict(int)
+        self._automatic_cooldown_until: dict[str, datetime] = {}
 
     def config(self) -> AutoMitigationConfig:
         with self._lock:
@@ -80,6 +81,11 @@ class MitigationService:
                 return False
 
             hit_key = self._auto_hit_key(event)
+            now = datetime.now(timezone.utc)
+            cooldown_until = self._automatic_cooldown_until.get(hit_key)
+            if cooldown_until is not None and cooldown_until > now:
+                return False
+
             self._automatic_hit_counter[hit_key] += 1
             hit_count = self._automatic_hit_counter[hit_key]
             threshold = max(1, config.escalate_after_count)
@@ -92,6 +98,12 @@ class MitigationService:
                 return False
 
             self._automatic_last_trigger_count[hit_key] = hit_count
+            if config.default_timeout_sec > 0:
+                self._automatic_cooldown_until[hit_key] = now + timedelta(
+                    seconds=config.default_timeout_sec
+                )
+            else:
+                self._automatic_cooldown_until.pop(hit_key, None)
             return True
 
     def auto_mitigation_request(self, event: FlowEvent) -> MitigationRequest:
