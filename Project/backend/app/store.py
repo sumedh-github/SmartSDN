@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import os
+import re
+import shutil
+import subprocess
 from threading import RLock
 from typing import Callable
 
@@ -55,6 +59,17 @@ class EventStore:
         self._mitigation_events: list[MitigationEvent] = []
         self._active_mitigations: dict[str, MitigationEvent] = {}
         self._max_mitigation_events = max_mitigation_events
+        self._physical_topology_enabled = (
+            os.getenv("SOC_PHYSICAL_TOPOLOGY_ENABLED", "true").strip().lower() == "true"
+        )
+        configured_vsctl = os.getenv("SOC_OVS_VSCTL_BIN", "ovs-vsctl")
+        configured_ofctl = os.getenv("SOC_OVS_OFCTL_BIN", "ovs-ofctl")
+        configured_ip = os.getenv("SOC_IP_BIN", "ip")
+        self._ovs_vsctl_bin = shutil.which(configured_vsctl) or configured_vsctl
+        self._ovs_ofctl_bin = shutil.which(configured_ofctl) or configured_ofctl
+        self._ip_bin = shutil.which(configured_ip) or configured_ip
+        self._of_proto = os.getenv("SOC_OVS_OPENFLOW_VERSION", "OpenFlow13")
+        self._prefer_sudo = os.getenv("SOC_OVS_USE_SUDO", "false").strip().lower() == "true"
 
     def add_event(self, event: FlowEvent) -> FlowEvent:
         with self._lock:
@@ -290,7 +305,10 @@ class EventStore:
             active_mitigations = list(self._active_mitigations.values())
         controller_status = self.controller_status()
 
-        switch_ids = sorted({event.switch_id or "s1" for event in events} or {"s1"})
+        physical_topology = self._discover_physical_topology()
+        physical_switch_ids = set(physical_topology["switches"]) if physical_topology else set()
+        event_switch_ids = {event.switch_id or "s1" for event in events}
+        switch_ids = sorted(physical_switch_ids | event_switch_ids or {"s1"})
         nodes: list[TopologyNode] = [
             TopologyNode(
                 id=CONTROLLER_NODE_ID,
@@ -318,7 +336,13 @@ class EventStore:
                 )
             )
 
-        host_ips = sorted({event.src_ip for event in events} | {event.dst_ip for event in events})
+        physical_host_edges = physical_topology["host_edges"] if physical_topology else {}
+        physical_host_links = physical_topology["host_links"] if physical_topology else {}
+        physical_switch_links = physical_topology["switch_links"] if physical_topology else {}
+
+        host_ips = sorted(
+            ({event.src_ip for event in events} | {event.dst_ip for event in events}) | set(physical_host_edges.keys())
+        )
         blocked_sources = {mitigation.src_ip for mitigation in active_mitigations if mitigation.action == "block_source"}
         isolated_switches = {
             mitigation.switch_id or "s1"
@@ -335,6 +359,9 @@ class EventStore:
             host_switch_votes[event.dst_ip][switch_id] += 1
         host_home_switch: dict[str, str] = {}
         for ip in host_ips:
+            if ip in physical_host_edges:
+                host_home_switch[ip] = physical_host_edges[ip]
+                continue
             votes = host_switch_votes.get(ip)
             if votes:
                 host_home_switch[ip] = sorted(votes.items(), key=lambda item: (item[1], item[0]), reverse=True)[0][0]
@@ -349,7 +376,11 @@ class EventStore:
                     kind="host",
                     label=ip,
                     status="mitigated" if ip in blocked_sources or home_switch in isolated_switches else "active",
-                    metadata={"ip": ip, "edge_switch": home_switch},
+                    metadata={
+                        "ip": ip,
+                        "edge_switch": home_switch,
+                        "edge_switch_source": "physical" if ip in physical_host_edges else "inferred",
+                    },
                 )
             )
 
@@ -368,6 +399,13 @@ class EventStore:
             )
 
         switch_link_stats: dict[tuple[str, str], dict[str, int | str]] = {}
+        for (left_switch, right_switch), is_up in physical_switch_links.items():
+            switch_link_stats[(left_switch, right_switch)] = {
+                "state": "normal" if is_up else "disabled",
+                "flow_count": 0,
+                "packet_count": 0,
+                "byte_count": 0,
+            }
         for event in events:
             src_switch = host_home_switch.get(event.src_ip)
             dst_switch = host_home_switch.get(event.dst_ip)
@@ -387,6 +425,8 @@ class EventStore:
             stats["byte_count"] = int(stats["byte_count"]) + event.byte_count
             if src_switch in isolated_switches or dst_switch in isolated_switches:
                 stats["state"] = "disabled"
+            elif stats["state"] == "disabled":
+                continue
             elif event.mitigation_state == "blocked":
                 stats["state"] = "blocked"
             elif _is_suspicious(event.prediction) and stats["state"] != "blocked":
@@ -410,8 +450,15 @@ class EventStore:
         for ip in host_ips:
             switch_id = host_home_switch[ip]
             host_id = _host_node_id(ip)
+            physically_up = physical_host_links.get((switch_id, ip), True)
             host_link_stats[(switch_id, host_id)] = {
-                "state": "disabled" if switch_id in isolated_switches else "blocked" if ip in blocked_sources else "idle",
+                "state": (
+                    "disabled"
+                    if switch_id in isolated_switches or not physically_up
+                    else "blocked"
+                    if ip in blocked_sources
+                    else "idle"
+                ),
                 "flow_count": 0,
                 "packet_count": 0,
                 "byte_count": 0,
@@ -426,7 +473,8 @@ class EventStore:
                 stats["flow_count"] = int(stats["flow_count"]) + 1
                 stats["packet_count"] = int(stats["packet_count"]) + event.packet_count
                 stats["byte_count"] = int(stats["byte_count"]) + event.byte_count
-                if switch_id in isolated_switches:
+                physically_up = physical_host_links.get((switch_id, ip), True)
+                if switch_id in isolated_switches or not physically_up:
                     stats["state"] = "disabled"
                 elif ip in blocked_sources or event.mitigation_state == "blocked":
                     stats["state"] = "blocked"
@@ -484,6 +532,129 @@ class EventStore:
             links=links,
             traffic_edges=traffic_edges,
         )
+
+    def _discover_physical_topology(self) -> dict[str, object] | None:
+        if not self._physical_topology_enabled:
+            return None
+        try:
+            switches_output = self._run_command([self._ovs_vsctl_bin, "list-br"])
+            switches = sorted(line.strip() for line in switches_output.splitlines() if line.strip())
+            if not switches:
+                return None
+
+            peer_map = self._discover_peer_interfaces()
+            host_edges: dict[str, str] = {}
+            host_links: dict[tuple[str, str], bool] = {}
+            switch_links: dict[tuple[str, str], bool] = {}
+
+            for switch_id in switches:
+                ports_output = self._run_command([self._ovs_vsctl_bin, "list-ports", switch_id])
+                ports = [line.strip() for line in ports_output.splitlines() if line.strip()]
+                port_state = self._discover_switch_port_state(switch_id)
+                for port_name in ports:
+                    peer_name = peer_map.get(port_name)
+                    if not peer_name:
+                        continue
+                    port_up = port_state.get(port_name, True)
+
+                    host_name_match = re.match(r"^(h\d+)-eth\d+$", peer_name)
+                    if host_name_match:
+                        host_ip = self._host_name_to_ip(host_name_match.group(1))
+                        host_edges.setdefault(host_ip, switch_id)
+                        key = (switch_id, host_ip)
+                        host_links[key] = host_links.get(key, True) and port_up
+                        continue
+
+                    peer_switch_match = re.match(r"^(s\d+)-eth\d+$", peer_name)
+                    if peer_switch_match:
+                        peer_switch = peer_switch_match.group(1)
+                        if peer_switch == switch_id:
+                            continue
+                        key = tuple(sorted((switch_id, peer_switch)))
+                        switch_links[key] = switch_links.get(key, True) and port_up
+
+            return {
+                "switches": switches,
+                "host_edges": host_edges,
+                "host_links": host_links,
+                "switch_links": switch_links,
+            }
+        except Exception:
+            return None
+
+    def _discover_peer_interfaces(self) -> dict[str, str]:
+        output = self._run_command([self._ip_bin, "-o", "link"])
+        index_to_name: dict[int, str] = {}
+        name_to_peer_index: dict[str, int] = {}
+        for line in output.splitlines():
+            match = re.match(r"^\s*(\d+):\s+([^:]+):", line)
+            if not match:
+                continue
+            index = int(match.group(1))
+            name_field = match.group(2).strip()
+            if "@if" in name_field:
+                name, peer_fragment = name_field.split("@if", 1)
+                peer_match = re.match(r"(\d+)", peer_fragment)
+                if peer_match:
+                    name_to_peer_index[name] = int(peer_match.group(1))
+            else:
+                name = name_field
+            index_to_name[index] = name
+
+        peer_map: dict[str, str] = {}
+        for name, peer_index in name_to_peer_index.items():
+            peer_name = index_to_name.get(peer_index)
+            if peer_name:
+                peer_map[name] = peer_name
+        return peer_map
+
+    def _discover_switch_port_state(self, switch_id: str) -> dict[str, bool]:
+        output = self._run_command([self._ovs_ofctl_bin, "-O", self._of_proto, "dump-ports-desc", switch_id])
+        port_state: dict[str, bool] = {}
+        current_port: str | None = None
+        for line in output.splitlines():
+            header_match = re.match(r"^\s*\d+\(([^)]+)\):", line)
+            if header_match:
+                current_port = header_match.group(1).strip()
+                port_state[current_port] = True
+                continue
+            if not current_port:
+                continue
+            if "config:" in line:
+                config_text = line.split("config:", 1)[1].upper()
+                if "PORT_DOWN" in config_text:
+                    port_state[current_port] = False
+            if "state:" in line:
+                state_text = line.split("state:", 1)[1].upper()
+                if "LINK_DOWN" in state_text or "PORT_DOWN" in state_text:
+                    port_state[current_port] = False
+        return port_state
+
+    def _host_name_to_ip(self, host_name: str) -> str:
+        match = re.match(r"^h(\d+)$", host_name)
+        if match:
+            host_index = int(match.group(1))
+            if 1 <= host_index <= 254:
+                return f"10.0.0.{host_index}"
+        return host_name
+
+    def _run_command(self, command: list[str]) -> str:
+        proc = subprocess.run(command, check=False, capture_output=True, text=True)
+        if proc.returncode == 0:
+            return proc.stdout or ""
+
+        stderr = (proc.stderr or "").strip()
+        if "permission denied" in stderr.lower() and self._prefer_sudo and shutil.which("sudo"):
+            sudo_proc = subprocess.run(["sudo", "-n", *command], check=False, capture_output=True, text=True)
+            if sudo_proc.returncode == 0:
+                return sudo_proc.stdout or ""
+            sudo_stderr = (sudo_proc.stderr or "").strip()
+            raise RuntimeError(
+                f"{' '.join(command)} failed ({proc.returncode}): {stderr}. "
+                f"Sudo fallback failed: {sudo_stderr}"
+            )
+
+        raise RuntimeError(f"{' '.join(command)} failed ({proc.returncode}): {stderr or 'unknown error'}")
 
     def stats(self) -> dict[str, object]:
         with self._lock:
