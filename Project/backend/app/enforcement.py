@@ -180,11 +180,11 @@ class EnforcementService:
             if not match:
                 continue
             port_no = int(match.group(1))
-            port_name = match.group(2).strip()
             # Skip OVS local/internal pseudo ports.
-            if port_no >= 65534 or port_name.lower() == "local":
+            if port_no >= 65534:
                 continue
-            ports.append(port_name)
+            # Use OpenFlow numeric port identifier for mod-port reliability.
+            ports.append(str(port_no))
         return ports
 
     def _candidate_source_block_bridges(self, switch_id: str | None) -> list[str]:
