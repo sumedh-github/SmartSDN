@@ -320,19 +320,36 @@ class EventStore:
 
         host_ips = sorted({event.src_ip for event in events} | {event.dst_ip for event in events})
         blocked_sources = {mitigation.src_ip for mitigation in active_mitigations if mitigation.action == "block_source"}
-        isolated_sources = {
-            mitigation.src_ip
+        isolated_switches = {
+            mitigation.switch_id or "s1"
             for mitigation in active_mitigations
-            if mitigation.action == "isolate_port" and mitigation.src_ip
+            if mitigation.action == "isolate_port"
         }
+
+        # Infer a single edge switch per host from observed traffic, so hosts
+        # are not rendered as attached to every transit switch they pass through.
+        host_switch_votes: dict[str, Counter[str]] = defaultdict(Counter)
+        for event in events:
+            switch_id = event.switch_id or "s1"
+            host_switch_votes[event.src_ip][switch_id] += 2
+            host_switch_votes[event.dst_ip][switch_id] += 1
+        host_home_switch: dict[str, str] = {}
         for ip in host_ips:
+            votes = host_switch_votes.get(ip)
+            if votes:
+                host_home_switch[ip] = sorted(votes.items(), key=lambda item: (item[1], item[0]), reverse=True)[0][0]
+            else:
+                host_home_switch[ip] = switch_ids[0]
+
+        for ip in host_ips:
+            home_switch = host_home_switch[ip]
             nodes.append(
                 TopologyNode(
                     id=_host_node_id(ip),
                     kind="host",
                     label=ip,
-                    status="mitigated" if ip in blocked_sources or ip in isolated_sources else "active",
-                    metadata={"ip": ip},
+                    status="mitigated" if ip in blocked_sources or home_switch in isolated_switches else "active",
+                    metadata={"ip": ip, "edge_switch": home_switch},
                 )
             )
 
@@ -350,43 +367,73 @@ class EventStore:
                 )
             )
 
-        isolated_switches = {
-            mitigation.switch_id or "s1"
-            for mitigation in active_mitigations
-            if mitigation.action == "isolate_port" and mitigation.src_ip is None
-        }
-        isolated_host_pairs = {
-            ((mitigation.switch_id or "s1"), mitigation.src_ip)
-            for mitigation in active_mitigations
-            if mitigation.action == "isolate_port" and mitigation.src_ip is not None
-        }
+        switch_link_stats: dict[tuple[str, str], dict[str, int | str]] = {}
+        for event in events:
+            src_switch = host_home_switch.get(event.src_ip)
+            dst_switch = host_home_switch.get(event.dst_ip)
+            if not src_switch or not dst_switch or src_switch == dst_switch:
+                continue
+            key = tuple(sorted((src_switch, dst_switch)))
+            if key not in switch_link_stats:
+                switch_link_stats[key] = {
+                    "state": "idle",
+                    "flow_count": 0,
+                    "packet_count": 0,
+                    "byte_count": 0,
+                }
+            stats = switch_link_stats[key]
+            stats["flow_count"] = int(stats["flow_count"]) + 1
+            stats["packet_count"] = int(stats["packet_count"]) + event.packet_count
+            stats["byte_count"] = int(stats["byte_count"]) + event.byte_count
+            if src_switch in isolated_switches or dst_switch in isolated_switches:
+                stats["state"] = "disabled"
+            elif event.mitigation_state == "blocked":
+                stats["state"] = "blocked"
+            elif _is_suspicious(event.prediction) and stats["state"] != "blocked":
+                stats["state"] = "suspicious"
+            elif stats["state"] == "idle":
+                stats["state"] = "normal"
+        for (left_switch, right_switch), stats in switch_link_stats.items():
+            links.append(
+                TopologyLink(
+                    id=f"{left_switch}--{right_switch}",
+                    source=left_switch,
+                    target=right_switch,
+                    state=stats["state"],
+                    flow_count=int(stats["flow_count"]),
+                    packet_count=int(stats["packet_count"]),
+                    byte_count=int(stats["byte_count"]),
+                )
+            )
 
         host_link_stats: dict[tuple[str, str], dict[str, int | str]] = {}
+        for ip in host_ips:
+            switch_id = host_home_switch[ip]
+            host_id = _host_node_id(ip)
+            host_link_stats[(switch_id, host_id)] = {
+                "state": "disabled" if switch_id in isolated_switches else "blocked" if ip in blocked_sources else "idle",
+                "flow_count": 0,
+                "packet_count": 0,
+                "byte_count": 0,
+            }
         for event in events:
-            switch_id = event.switch_id or "s1"
             for ip in (event.src_ip, event.dst_ip):
+                switch_id = host_home_switch.get(ip)
+                if not switch_id:
+                    continue
                 host_id = _host_node_id(ip)
-                key = (switch_id, host_id)
-                if key not in host_link_stats:
-                    host_link_stats[key] = {
-                        "state": "idle",
-                        "flow_count": 0,
-                        "packet_count": 0,
-                        "byte_count": 0,
-                    }
-                stats = host_link_stats[key]
+                stats = host_link_stats[(switch_id, host_id)]
                 stats["flow_count"] = int(stats["flow_count"]) + 1
                 stats["packet_count"] = int(stats["packet_count"]) + event.packet_count
                 stats["byte_count"] = int(stats["byte_count"]) + event.byte_count
-                if switch_id in isolated_switches or (switch_id, ip) in isolated_host_pairs or ip in isolated_sources:
+                if switch_id in isolated_switches:
                     stats["state"] = "disabled"
-                elif event.mitigation_state == "blocked":
+                elif ip in blocked_sources or event.mitigation_state == "blocked":
                     stats["state"] = "blocked"
-                elif _is_suspicious(event.prediction) and stats["state"] != "blocked":
+                elif _is_suspicious(event.prediction) and stats["state"] not in {"blocked", "disabled"}:
                     stats["state"] = "suspicious"
                 elif stats["state"] == "idle":
                     stats["state"] = "normal"
-
         for (switch_id, host_id), stats in host_link_stats.items():
             links.append(
                 TopologyLink(
