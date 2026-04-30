@@ -76,7 +76,6 @@ class EnforcementService:
                 ok=False,
                 message="Flow pair mitigation requires src_ip and dst_ip.",
             )
-        bridge = self._bridge_for(event.switch_id)
         proto = event.protocol.strip().upper() if event.protocol else "ALL"
         if proto == "TCP":
             match_fragments = ["tcp"]
@@ -99,11 +98,32 @@ class EnforcementService:
                 "actions=drop",
             ]
         )
-        self._run([self._ovs_ofctl, "-O", self._of_proto, "add-flow", bridge, flow_expr])
-        self._flow_table[event.mitigation_id] = [(bridge, cookie)]
+        # Apply the same flow-pair block across all reachable lab switches so
+        # the host pair remains blocked regardless of path choice.
+        bridges = self._candidate_source_block_bridges(event.switch_id)
+        applied: list[tuple[str, str]] = []
+        for bridge in bridges:
+            if self._run_allow_missing_bridge(
+                [self._ovs_ofctl, "-O", self._of_proto, "add-flow", bridge, flow_expr]
+            ):
+                applied.append((bridge, cookie))
+        if not applied:
+            return EnforcementResult(
+                ok=False,
+                message=(
+                    "No matching switch bridges found for flow-pair block "
+                    f"{event.src_ip}->{event.dst_ip}. Adjust SOC_OVS_BRIDGE_PREFIX or "
+                    "SOC_SOURCE_BLOCK_BRIDGE_MAX."
+                ),
+            )
+        self._flow_table[event.mitigation_id] = applied
+        bridge_list = ", ".join(bridge for bridge, _ in applied)
         return EnforcementResult(
             ok=True,
-            message=f"Applied flow-pair block ({event.src_ip} -> {event.dst_ip}, {proto}) on {bridge}.",
+            message=(
+                f"Applied flow-pair block ({event.src_ip} -> {event.dst_ip}, {proto}) "
+                f"on bridges: {bridge_list}."
+            ),
         )
 
     def _apply_block_source(self, event: MitigationEvent) -> EnforcementResult:
