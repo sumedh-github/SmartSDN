@@ -145,8 +145,6 @@ class ScenarioService:
             helper_invoked, helper_output = self._run_real_helper(request, source_hosts, destination_host)
 
         generated = 0
-        auto_mitigations_applied = 0
-        auto_mitigations_failed = 0
         for src_ip in source_hosts:
             for _ in range(request.repeat):
                 self._counter += 1
@@ -160,11 +158,7 @@ class ScenarioService:
                     helper_invoked=helper_invoked,
                 )
                 stored_event = self._store.add_event(event)
-                auto_result = self._run_auto_mitigation_if_needed(stored_event)
-                if auto_result == "applied":
-                    auto_mitigations_applied += 1
-                elif auto_result == "failed":
-                    auto_mitigations_failed += 1
+                self._run_auto_mitigation_if_needed(stored_event)
                 generated += 1
         return {
             "scenario": request.scenario,
@@ -172,13 +166,11 @@ class ScenarioService:
             "helper_requested": helper_requested,
             "helper_invoked": helper_invoked,
             "helper_output": helper_output,
-            "auto_mitigations_applied": auto_mitigations_applied,
-            "auto_mitigations_failed": auto_mitigations_failed,
         }
 
-    def _run_auto_mitigation_if_needed(self, event: FlowEvent) -> str:
+    def _run_auto_mitigation_if_needed(self, event: FlowEvent) -> None:
         if not self._mitigation_service.should_auto_mitigate(event):
-            return "skipped"
+            return
 
         auto_request = self._mitigation_service.auto_mitigation_request(event)
         mitigation_event = self._mitigation_service.register_request(auto_request).model_copy(
@@ -195,7 +187,6 @@ class ScenarioService:
                     "enforcement_message": enforcement_result.message,
                 }
             )
-            result = "applied"
         else:
             mitigation_event = mitigation_event.model_copy(
                 update={
@@ -204,9 +195,7 @@ class ScenarioService:
                     "enforcement_message": enforcement_result.message,
                 }
             )
-            result = "failed"
         self._store.register_mitigation(mitigation_event)
-        return result
 
     def _normalize_source_hosts(self, source_hosts: list[str] | None) -> list[str]:
         if not source_hosts:

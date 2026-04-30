@@ -223,7 +223,3 @@ class MitigationService:
 
     def _auto_hit_key(self, event: FlowEvent) -> str:
         return f"{event.src_ip}|{event.dst_ip}|{event.protocol.upper()}"
-
-    def auto_hit_count(self, event: FlowEvent) -> int:
-        with self._lock:
-            return self._automatic_hit_counter.get(self._auto_hit_key(event), 0)
