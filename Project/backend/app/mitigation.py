@@ -115,23 +115,22 @@ class MitigationService:
             )
 
         if selected_action == "isolate_port":
-            inferred_port = self._infer_source_port(event.src_ip)
             return MitigationRequest(
                 flow_key=event.flow_key,
-                src_ip=event.src_ip,
+                src_ip=None,
                 dst_ip=event.dst_ip,
                 protocol=None,
                 switch_id=event.switch_id or "s1",
-                port_id=inferred_port,
+                port_id=0,
                 action="isolate_port",
                 reason=(
                     f"Automatic mitigation for {event.prediction} (conf={event.confidence:.3f}, "
-                    f"hit_count={hit_count}) with source-port isolation."
+                    f"hit_count={hit_count}) with switch isolation."
                 ),
                 threshold=threshold,
                 condition=(
                     f"label={event.prediction}, confidence={event.confidence:.3f}, hit_count={hit_count}, "
-                    f"isolate_switch={event.switch_id or 's1'}, port_id={inferred_port}"
+                    f"isolate_switch={event.switch_id or 's1'}, mode=all_data_ports"
                 ),
                 timeout_sec=config.default_timeout_sec,
                 triggered_by="automatic",
@@ -162,14 +161,6 @@ class MitigationService:
             return config.action_order[0]
         return "block_source"
 
-    def _infer_source_port(self, src_ip: str) -> int:
-        parts = src_ip.strip().split(".")
-        if len(parts) == 4 and parts[-1].isdigit():
-            octet = int(parts[-1])
-            if octet > 0:
-                return octet
-        return 1
-
     def _normalize_request(self, request: MitigationRequest) -> MitigationRequest:
         normalized_protocol = request.protocol.upper().strip() if request.protocol else None
         if normalized_protocol in {"ANY", "*"}:
@@ -186,10 +177,9 @@ class MitigationService:
             if not normalized.src_ip:
                 raise ValueError("Block Source Host requires src_ip.")
         elif normalized.action == "isolate_port":
-            if normalized.port_id is None:
-                raise ValueError("Disable/Isolate Port requires port_id.")
             if not normalized.switch_id:
                 normalized = normalized.model_copy(update={"switch_id": "s1"})
+            normalized = normalized.model_copy(update={"port_id": 0, "src_ip": None})
         return normalized
 
     def _target_type_for_action(self, action: str) -> str:
@@ -204,6 +194,4 @@ class MitigationService:
             return f"flow_pair:{request.src_ip}->{request.dst_ip}:{request.protocol or 'ALL'}"
         if request.action == "block_source":
             return f"source_host:{request.src_ip}"
-        if request.port_id == 0:
-            return f"port:{request.switch_id or 's1'}:all_ports"
-        return f"port:{request.switch_id or 's1'}:{request.port_id}"
+        return f"switch_isolation:{request.switch_id or 's1'}"

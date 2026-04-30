@@ -164,10 +164,9 @@ const mitigationPreview = (payload) => {
     ].join('\n')
   }
   return [
-    'Action: Disable / Isolate Port',
+    'Action: Disable / Isolate Port (Switch Isolation)',
     `Switch: ${payload.switch_id || 's1'}`,
-    `Port: ${payload.port_id === null ? 'ALL' : payload.port_id ?? 'n/a'}`,
-    `Source IP hint: ${payload.src_ip || 'n/a'}`,
+    'Scope: all data ports on selected switch',
   ].join('\n')
 }
 
@@ -737,7 +736,7 @@ function MitigationSection({
                 ...prev,
                 action: event.target.value,
                 protocol: event.target.value === 'isolate_port' ? 'ALL' : prev.protocol || 'ALL',
-                port_id: event.target.value === 'isolate_port' ? prev.port_id || 'ALL' : prev.port_id,
+                port_id: event.target.value === 'isolate_port' ? 'ALL' : prev.port_id,
               }))
             }
           >
@@ -747,11 +746,13 @@ function MitigationSection({
               </option>
             ))}
           </select>
-          <input
-            placeholder="Source IP (required for block_flow/block_source)"
-            value={manualAction.src_ip}
-            onChange={(event) => setManualAction((prev) => ({ ...prev, src_ip: event.target.value }))}
-          />
+          {!isIsolatePort && (
+            <input
+              placeholder="Source IP (required for block_flow/block_source)"
+              value={manualAction.src_ip}
+              onChange={(event) => setManualAction((prev) => ({ ...prev, src_ip: event.target.value }))}
+            />
+          )}
           {isBlockFlow && (
             <input
               placeholder="Destination IP (required for block_flow)"
@@ -771,23 +772,21 @@ function MitigationSection({
               ))}
             </select>
           )}
-          <input
-            placeholder="Switch ID (required for isolate_port)"
-            value={manualAction.switch_id}
-            onChange={(event) => setManualAction((prev) => ({ ...prev, switch_id: event.target.value }))}
-          />
-          <select
-            value={manualAction.port_id}
-            onChange={(event) => setManualAction((prev) => ({ ...prev, port_id: event.target.value }))}
-            disabled={!isIsolatePort}
-          >
-            <option value="ALL">ALL Ports</option>
-            {Array.from({ length: 16 }, (_, idx) => String(idx + 1)).map((port) => (
-              <option key={port} value={port}>
-                Port {port}
-              </option>
-            ))}
-          </select>
+          {isIsolatePort && (
+            <input
+              placeholder="Switch ID (required for switch isolation)"
+              value={manualAction.switch_id}
+              onChange={(event) => setManualAction((prev) => ({ ...prev, switch_id: event.target.value }))}
+            />
+          )}
+          {!isIsolatePort && (
+            <input
+              placeholder="Switch ID (required for isolate_port)"
+              value={manualAction.switch_id}
+              onChange={(event) => setManualAction((prev) => ({ ...prev, switch_id: event.target.value }))}
+            />
+          )}
+          {isIsolatePort && <p className="empty-message">Switch isolation will disable all data ports on this switch.</p>}
           <input
             placeholder="Reason"
             value={manualAction.reason}
@@ -1221,17 +1220,11 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
     }
 
     if (action === 'isolate_port') {
-      const portInput = window.prompt('Enter host-facing switch port to isolate:', '1')
-      const port = Number(portInput)
-      if (!Number.isInteger(port) || port < 1) {
-        setActionMessage('Port isolation requires a valid switch port number.')
-        return
-      }
       await runManualMitigation({
         action,
-        src_ip: flow.src_ip,
+        src_ip: null,
         switch_id: flow.switch_id || 's1',
-        port_id: port,
+        port_id: 0,
         reason: `Manual alert action for ${flow.prediction}`,
         timeout_sec: mitigationDraft.default_timeout_sec,
         triggered_by: 'manual',
@@ -1263,17 +1256,16 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
 
   const applyActionToSession = async (session, action) => {
     if (action === 'isolate_port') {
-      const portInput = window.prompt('Enter host-facing switch port to isolate:', '1')
-      const port = Number(portInput)
-      if (!Number.isInteger(port) || port < 1) {
-        setActionMessage('Port isolation requires a valid switch port number.')
+      const switchInput = window.prompt('Enter switch ID to isolate:', 's1')
+      if (!switchInput || !switchInput.trim()) {
+        setActionMessage('Switch isolation requires a valid switch ID.')
         return
       }
       await runManualMitigation({
         action,
-        src_ip: session.source_entity,
-        switch_id: 's1',
-        port_id: port,
+        src_ip: null,
+        switch_id: switchInput.trim(),
+        port_id: 0,
         reason: `Manual session action for ${session.dominant_label}`,
         timeout_sec: mitigationDraft.default_timeout_sec,
         triggered_by: 'manual',
@@ -1435,13 +1427,11 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
     const normalizedPortId =
       manualAction.action !== 'isolate_port'
         ? null
-        : manualAction.port_id === 'ALL'
-          ? 0
-          : Number(manualAction.port_id)
+        : 0
     await runManualMitigation({
       action: manualAction.action,
-      src_ip: manualAction.src_ip || null,
-      dst_ip: manualAction.dst_ip || null,
+      src_ip: manualAction.action === 'isolate_port' ? null : manualAction.src_ip || null,
+      dst_ip: manualAction.action === 'isolate_port' ? null : manualAction.dst_ip || null,
       protocol: normalizedProtocol,
       switch_id: manualAction.switch_id || null,
       port_id: Number.isFinite(normalizedPortId) ? normalizedPortId : null,
