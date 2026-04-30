@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import json
 import os
 import re
 import shutil
@@ -70,6 +71,10 @@ class EventStore:
         self._ip_bin = shutil.which(configured_ip) or configured_ip
         self._of_proto = os.getenv("SOC_OVS_OPENFLOW_VERSION", "OpenFlow13")
         self._prefer_sudo = os.getenv("SOC_OVS_USE_SUDO", "false").strip().lower() == "true"
+        self._static_physical_topology = self._parse_static_physical_topology(
+            os.getenv("SOC_STATIC_PHYSICAL_TOPOLOGY_JSON", "").strip()
+        )
+        self._last_topology_discovery_error: str | None = None
 
     def add_event(self, event: FlowEvent) -> FlowEvent:
         with self._lock:
@@ -307,8 +312,11 @@ class EventStore:
 
         physical_topology = self._discover_physical_topology()
         physical_switch_ids = set(physical_topology["switches"]) if physical_topology else set()
+        controller_switch_ids = {
+            f"s{index}" for index in range(1, max(0, int(controller_status.datapath_count)) + 1)
+        }
         event_switch_ids = {event.switch_id or "s1" for event in events}
-        switch_ids = sorted(physical_switch_ids | event_switch_ids or {"s1"})
+        switch_ids = sorted(physical_switch_ids | controller_switch_ids | event_switch_ids or {"s1"})
         nodes: list[TopologyNode] = [
             TopologyNode(
                 id=CONTROLLER_NODE_ID,
@@ -321,6 +329,8 @@ class EventStore:
                     "mode": controller_status.mode,
                     "datapath_count": controller_status.datapath_count,
                     "stale": controller_status.stale,
+                    "topology_source": physical_topology["source"] if physical_topology else "inferred",
+                    "topology_discovery_error": self._last_topology_discovery_error,
                 },
             )
         ]
@@ -535,12 +545,13 @@ class EventStore:
 
     def _discover_physical_topology(self) -> dict[str, object] | None:
         if not self._physical_topology_enabled:
-            return None
+            return self._static_physical_topology
+        self._last_topology_discovery_error = None
         try:
             switches_output = self._run_command([self._ovs_vsctl_bin, "list-br"])
             switches = sorted(line.strip() for line in switches_output.splitlines() if line.strip())
             if not switches:
-                return None
+                return self._static_physical_topology
 
             peer_map = self._discover_peer_interfaces()
             host_edges: dict[str, str] = {}
@@ -574,13 +585,73 @@ class EventStore:
                         switch_links[key] = switch_links.get(key, True) and port_up
 
             return {
+                "source": "dynamic",
                 "switches": switches,
                 "host_edges": host_edges,
                 "host_links": host_links,
                 "switch_links": switch_links,
             }
+        except Exception as exc:
+            self._last_topology_discovery_error = str(exc)
+            return self._static_physical_topology
+
+    def _parse_static_physical_topology(self, raw: str) -> dict[str, object] | None:
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
         except Exception:
             return None
+        if not isinstance(payload, dict):
+            return None
+
+        switches_raw = payload.get("switches", [])
+        host_edges_raw = payload.get("host_edges", {})
+        switch_links_raw = payload.get("switch_links", [])
+        if not isinstance(switches_raw, list) or not isinstance(host_edges_raw, dict):
+            return None
+
+        switches = sorted(
+            value.strip()
+            for value in switches_raw
+            if isinstance(value, str) and value.strip()
+        )
+        host_edges: dict[str, str] = {}
+        host_links: dict[tuple[str, str], bool] = {}
+        for host_ip, switch_id in host_edges_raw.items():
+            if not isinstance(host_ip, str) or not isinstance(switch_id, str):
+                continue
+            host_key = host_ip.strip()
+            switch_key = switch_id.strip()
+            if not host_key or not switch_key:
+                continue
+            host_edges[host_key] = switch_key
+            host_links[(switch_key, host_key)] = True
+
+        switch_links: dict[tuple[str, str], bool] = {}
+        if isinstance(switch_links_raw, list):
+            for edge in switch_links_raw:
+                if (
+                    isinstance(edge, list)
+                    and len(edge) == 2
+                    and all(isinstance(value, str) and value.strip() for value in edge)
+                ):
+                    left, right = sorted([edge[0].strip(), edge[1].strip()])
+                    if left != right:
+                        switch_links[(left, right)] = True
+
+        if not switches:
+            switches = sorted(set(host_edges.values()) | {node for pair in switch_links for node in pair})
+        if not switches:
+            return None
+
+        return {
+            "source": "static",
+            "switches": switches,
+            "host_edges": host_edges,
+            "host_links": host_links,
+            "switch_links": switch_links,
+        }
 
     def _discover_peer_interfaces(self) -> dict[str, str]:
         output = self._run_command([self._ip_bin, "-o", "link"])
