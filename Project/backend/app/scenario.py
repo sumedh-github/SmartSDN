@@ -161,6 +161,7 @@ class ScenarioService:
                 self._run_auto_mitigation_if_needed(stored_event)
                 generated += 1
         return {
+            "scenario": request.scenario,
             "generated_events": generated,
             "helper_requested": helper_requested,
             "helper_invoked": helper_invoked,

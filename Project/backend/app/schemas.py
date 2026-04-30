@@ -180,6 +180,7 @@ class ScenarioRunRequest(BaseModel):
 class ScenarioRunResponse(BaseModel):
     status: str
     scenario: str
+    scenario_name: str | None = None
     generated_events: int
     mode: ModeType
     message: str

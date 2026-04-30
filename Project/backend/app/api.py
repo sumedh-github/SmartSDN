@@ -371,7 +371,7 @@ def run_scenario(
 
     return ScenarioRunResponse(
         status="accepted",
-        scenario=request.scenario,
+        scenario=str(result["scenario"]),
         generated_events=int(result["generated_events"]),
         mode=mode_service.get_mode(),
         message="Scenario events generated in DEMO_SCENARIO mode.",

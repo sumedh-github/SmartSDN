@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import './App.css'
 import LoginGate from './LoginGate'
@@ -1011,6 +1011,7 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
   const [loading, setLoading] = useState(true)
   const [actionMessage, setActionMessage] = useState('')
   const [error, setError] = useState('')
+  const scenarioRequestSeqRef = useRef(0)
 
   const authedRequest = useCallback(
     async (path, options) => {
@@ -1356,6 +1357,8 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
   }
 
   const runScenario = async (scenario) => {
+    const requestSeq = scenarioRequestSeqRef.current + 1
+    scenarioRequestSeqRef.current = requestSeq
     setActionBusy(true)
     setActionMessage('')
     try {
@@ -1381,12 +1384,19 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
         : response.helper_requested
           ? ` helper=requested but unavailable (${response.helper_output || 'synthetic fallback'})`
           : ' helper=synthetic (real helper not requested)'
-      setActionMessage(`${response.generated_events} scenario events generated for ${scenario}.${helperNote}`)
+      const scenarioName = response.scenario || scenario
+      if (requestSeq === scenarioRequestSeqRef.current) {
+        setActionMessage(`${response.generated_events} scenario events generated for ${scenarioName}.${helperNote}`)
+      }
       await loadDashboardData()
     } catch (scenarioError) {
-      setActionMessage(scenarioError instanceof Error ? scenarioError.message : 'Scenario run failed.')
+      if (requestSeq === scenarioRequestSeqRef.current) {
+        setActionMessage(scenarioError instanceof Error ? scenarioError.message : 'Scenario run failed.')
+      }
     } finally {
-      setActionBusy(false)
+      if (requestSeq === scenarioRequestSeqRef.current) {
+        setActionBusy(false)
+      }
     }
   }
 
