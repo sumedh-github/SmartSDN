@@ -25,6 +25,7 @@ class MitigationService:
         self._requests: list[MitigationRequest] = []
         self._config = AutoMitigationConfig()
         self._automatic_hit_counter: dict[str, int] = defaultdict(int)
+        self._automatic_last_trigger_count: dict[str, int] = defaultdict(int)
 
     def config(self) -> AutoMitigationConfig:
         with self._lock:
@@ -71,20 +72,32 @@ class MitigationService:
     def should_auto_mitigate(self, event: FlowEvent) -> bool:
         with self._lock:
             config = self._config.model_copy()
+            if not config.enabled:
+                return False
+            if event.prediction not in config.suspicious_labels:
+                return False
+            if event.confidence < config.min_confidence:
+                return False
 
-        if not config.enabled:
-            return False
-        if event.prediction not in config.suspicious_labels:
-            return False
-        if event.confidence < config.min_confidence:
-            return False
-        return True
+            hit_key = self._auto_hit_key(event)
+            self._automatic_hit_counter[hit_key] += 1
+            hit_count = self._automatic_hit_counter[hit_key]
+            threshold = max(1, config.escalate_after_count)
+            last_trigger_count = self._automatic_last_trigger_count[hit_key]
+
+            # Trigger once at threshold and then once per additional threshold window.
+            if hit_count < threshold:
+                return False
+            if (hit_count - last_trigger_count) < threshold:
+                return False
+
+            self._automatic_last_trigger_count[hit_key] = hit_count
+            return True
 
     def auto_mitigation_request(self, event: FlowEvent) -> MitigationRequest:
         with self._lock:
             config = self._config.model_copy()
-            hit_key = f"{event.src_ip}|{event.dst_ip}|{event.protocol.upper()}"
-            self._automatic_hit_counter[hit_key] += 1
+            hit_key = self._auto_hit_key(event)
             hit_count = self._automatic_hit_counter[hit_key]
         selected_action = self._select_primary_auto_action(config)
         threshold = (
@@ -93,7 +106,7 @@ class MitigationService:
         )
 
         if selected_action == "block_flow":
-            protocol = (event.protocol or "ALL").upper().strip()
+            protocol = "ALL"
             return MitigationRequest(
                 flow_key=event.flow_key,
                 src_ip=event.src_ip,
@@ -103,12 +116,12 @@ class MitigationService:
                 action="block_flow",
                 reason=(
                     f"Automatic mitigation for {event.prediction} (conf={event.confidence:.3f}, "
-                    f"hit_count={hit_count}) with flow-pair blocking."
+                    f"hit_count={hit_count}) with flow-pair blocking across TCP/UDP/ICMP."
                 ),
                 threshold=threshold,
                 condition=(
                     f"label={event.prediction}, confidence={event.confidence:.3f}, hit_count={hit_count}, "
-                    f"flow_pair={event.src_ip}->{event.dst_ip}, protocol={protocol}"
+                    f"flow_pair={event.src_ip}->{event.dst_ip}, blocked_protocols=TCP/UDP/ICMP"
                 ),
                 timeout_sec=config.default_timeout_sec,
                 triggered_by="automatic",
@@ -195,3 +208,6 @@ class MitigationService:
         if request.action == "block_source":
             return f"source_host:{request.src_ip}"
         return f"switch_isolation:{request.switch_id or 's1'}"
+
+    def _auto_hit_key(self, event: FlowEvent) -> str:
+        return f"{event.src_ip}|{event.dst_ip}|{event.protocol.upper()}"
