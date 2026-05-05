@@ -31,8 +31,8 @@ function LoginGate({ onLogin, loading, backendError }) {
     <main className="login-shell">
       <section className="login-layout">
         <aside className="login-hero">
-          <p className="login-kicker">smartSDN security operations</p>
-          <h1>Commercial-grade SDN monitoring workspace</h1>
+          <p className="login-kicker">AI-SDN</p>
+          <h1>AI-SDN</h1>
           <p className="muted">
             Observe live controller telemetry, investigate suspicious sessions, and orchestrate mitigation from a
             single operator console.
