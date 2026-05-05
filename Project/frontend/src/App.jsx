@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import './App.css'
 import LoginGate from './LoginGate'
 
@@ -29,16 +29,20 @@ const MITIGATION_ACTIONS = [
 
 const MANUAL_PROTOCOL_OPTIONS = ['ALL', 'TCP', 'UDP', 'ICMP']
 
-const NAV_ITEMS = [
-  { to: '/dashboard/overview', label: 'Overview Dashboard' },
-  { to: '/dashboard/topology', label: 'Topology' },
-  { to: '/dashboard/raw-flows', label: 'Raw Flows' },
-  { to: '/dashboard/sessions', label: 'Sessions' },
-  { to: '/dashboard/alerts', label: 'Alerts' },
-  { to: '/dashboard/scenarios', label: 'Scenarios' },
-  { to: '/dashboard/mitigation', label: 'Mitigation' },
-  { to: '/dashboard/health', label: 'System / Controller Health' },
+const WORKSPACE_ITEMS = [
+  { path: 'mission', label: 'Mission Control', caption: 'Command center and launch deck' },
+  { path: 'network-map', label: 'Network Map', caption: 'Topology and link intelligence' },
+  { path: 'flow-monitor', label: 'Flow Monitor', caption: 'Raw packet flow telemetry' },
+  { path: 'conversations', label: 'Conversations', caption: 'Grouped session intelligence' },
+  { path: 'triage', label: 'Triage Desk', caption: 'Alert review and operator actions' },
+  { path: 'sim-lab', label: 'Simulation Lab', caption: 'Scenario generation controls' },
+  { path: 'response-studio', label: 'Response Studio', caption: 'Auto + manual mitigation' },
+  { path: 'runtime', label: 'Runtime Health', caption: 'Controller and system posture' },
 ]
+
+const WORKSPACE_META = Object.fromEntries(
+  WORKSPACE_ITEMS.map((item) => [item.path, { label: item.label, caption: item.caption }]),
+)
 
 class ApiError extends Error {
   constructor(message, status) {
@@ -929,7 +933,90 @@ function HealthSection({ healthCards, controllerStatus }) {
   )
 }
 
+function MissionControlSection({
+  stats,
+  chartRows,
+  alerts,
+  sessions,
+  activeMitigations,
+  controllerStatus,
+  mitigationConfig,
+}) {
+  return (
+    <section className="mission-stack">
+      <section className="summary-grid">
+        <article className="summary-card">
+          <h2>Live Flows</h2>
+          <strong>{stats.total_flows}</strong>
+        </article>
+        <article className="summary-card">
+          <h2>Suspicious</h2>
+          <strong>{stats.suspicious_flows}</strong>
+        </article>
+        <article className="summary-card">
+          <h2>Sessions</h2>
+          <strong>{sessions.length}</strong>
+        </article>
+        <article className="summary-card">
+          <h2>Open Alerts</h2>
+          <strong>{alerts.length}</strong>
+        </article>
+        <article className="summary-card">
+          <h2>Active Mitigations</h2>
+          <strong>{activeMitigations.length}</strong>
+        </article>
+      </section>
+
+      <section className="mission-grid">
+        <section className="panel">
+          <div className="panel-title-row">
+            <h2>Threat Pulse</h2>
+            <span className="muted">Current class distribution snapshot</span>
+          </div>
+          {chartRows.length === 0 ? (
+            <p className="empty-message">No live flow events received yet.</p>
+          ) : (
+            <div className="bar-chart">
+              {chartRows.map((item) => (
+                <div className="bar-row" key={item.label}>
+                  <span className="bar-label">{item.label}</span>
+                  <div className="bar-track">
+                    <div className="bar-fill" style={{ width: `${item.percent}%` }} />
+                  </div>
+                  <span className="bar-value">{item.count}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="panel mission-summary">
+          <h2>Command Readout</h2>
+          <ul>
+            <li>
+              Controller polling: <strong>{controllerStatus.polling_active ? 'active' : 'inactive'}</strong>
+            </li>
+            <li>
+              Model loaded: <strong>{controllerStatus.model_loaded ? 'yes' : 'no'}</strong>
+            </li>
+            <li>
+              Datapaths: <strong>{controllerStatus.datapath_count}</strong>
+            </li>
+            <li>
+              Auto mitigation: <strong>{mitigationConfig.enabled ? 'enabled' : 'disabled'}</strong>
+            </li>
+          </ul>
+          <p className="muted">
+            Use the command rail to jump into map analysis, triage, simulation, and response workflows.
+          </p>
+        </section>
+      </section>
+    </section>
+  )
+}
+
 function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
+  const location = useLocation()
   const [health, setHealth] = useState({
     status: 'ok',
     components: {
@@ -1184,6 +1271,9 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
   )
 
   const modeMeta = MODE_META[modeStatus.mode] || MODE_META.REAL_ML
+  const workspacePathMatch = location.pathname.match(/\/workspace\/([^/]+)/)
+  const activeWorkspacePath = workspacePathMatch?.[1] || 'mission'
+  const activeWorkspaceMeta = WORKSPACE_META[activeWorkspacePath] || WORKSPACE_META.mission
 
   const runManualMitigation = async (payload) => {
     if (!window.confirm(`Confirm mitigation target:\n\n${mitigationPreview(payload)}`)) {
@@ -1540,115 +1630,170 @@ function SocDashboard({ token, currentUser, onLogout, onSessionExpired }) {
   }
 
   return (
-    <main className="soc-shell">
-      <header className="soc-header">
-        <div>
-          <h1>smartSDN</h1>
-          <p className="muted">
-            Live stream from backend {API_BASE_URL} | Polling every {POLL_INTERVAL_MS / 1000}s
-          </p>
-        </div>
-        <div className="header-actions">
+    <main className="workspace-shell">
+      <aside className="workspace-rail">
+        <header className="workspace-brand">
+          <h1>smartSDN // UI2</h1>
+          <p className="muted">Operator workspace</p>
+        </header>
+        <div className="workspace-identity">
           <span className="user-pill">{currentUser}</span>
           <button className="btn ghost" onClick={onLogout} type="button">
             Sign out
           </button>
         </div>
-      </header>
+        <nav className="workspace-command-list" aria-label="Workspace modules">
+          {WORKSPACE_ITEMS.map((item) => (
+            <NavLink
+              key={item.path}
+              to={`/workspace/${item.path}`}
+              className={({ isActive }) => `workspace-command ${isActive ? 'active' : ''}`}
+            >
+              <strong>{item.label}</strong>
+              <small>{item.caption}</small>
+            </NavLink>
+          ))}
+        </nav>
+      </aside>
 
-      <section className={`mode-banner ${modeStatus.mode === 'REAL_ML' ? 'real' : 'demo'}`}>
-        <div>
-          <strong>{modeMeta.label}</strong>
-          <p>{modeStatus.description || modeMeta.description}</p>
-        </div>
-        <div className="mode-buttons">
-          <button
-            type="button"
-            className={`btn ${modeStatus.mode === 'REAL_ML' ? 'primary' : 'ghost'}`}
-            disabled={actionBusy}
-            onClick={() => handleModeSwitch('REAL_ML')}
-          >
-            REAL ML MODE
-          </button>
-          <button
-            type="button"
-            className={`btn ${modeStatus.mode === 'DEMO_SCENARIO' ? 'warning' : 'ghost'}`}
-            disabled={actionBusy}
-            onClick={() => handleModeSwitch('DEMO_SCENARIO')}
-          >
-            DEMO / SCENARIO MODE
-          </button>
-        </div>
+      <section className="workspace-main">
+        <header className="workspace-header">
+          <div>
+            <h2>{activeWorkspaceMeta.label}</h2>
+            <p className="muted">{activeWorkspaceMeta.caption}</p>
+            <p className="muted workspace-source-note">
+              Backend {API_BASE_URL} | refresh cadence {POLL_INTERVAL_MS / 1000}s
+            </p>
+          </div>
+          <section className={`mode-banner ${modeStatus.mode === 'REAL_ML' ? 'real' : 'demo'}`}>
+            <div>
+              <strong>{modeMeta.label}</strong>
+              <p>{modeStatus.description || modeMeta.description}</p>
+            </div>
+            <div className="mode-buttons">
+              <button
+                type="button"
+                className={`btn ${modeStatus.mode === 'REAL_ML' ? 'primary' : 'ghost'}`}
+                disabled={actionBusy}
+                onClick={() => handleModeSwitch('REAL_ML')}
+              >
+                REAL ML MODE
+              </button>
+              <button
+                type="button"
+                className={`btn ${modeStatus.mode === 'DEMO_SCENARIO' ? 'warning' : 'ghost'}`}
+                disabled={actionBusy}
+                onClick={() => handleModeSwitch('DEMO_SCENARIO')}
+              >
+                DEMO / SCENARIO MODE
+              </button>
+            </div>
+          </section>
+        </header>
+
+        {error && <div className="error-banner">API error: {error}</div>}
+        {actionMessage && <div className="action-banner">{actionMessage}</div>}
+
+        <Routes>
+          <Route path="/" element={<Navigate to="mission" replace />} />
+          <Route
+            path="mission"
+            element={
+              <MissionControlSection
+                stats={stats}
+                chartRows={chartRows}
+                alerts={alerts}
+                sessions={sessions}
+                activeMitigations={activeMitigations}
+                controllerStatus={controllerStatus}
+                mitigationConfig={mitigationConfig}
+              />
+            }
+          />
+          <Route path="network-map" element={<TopologySection topology={topology} graphLayout={graphLayout} />} />
+          <Route path="flow-monitor" element={<RawFlowsSection flows={flows} />} />
+          <Route
+            path="conversations"
+            element={<SessionsSection sessions={sessions} onAction={applyActionToSession} actionBusy={actionBusy} />}
+          />
+          <Route
+            path="triage"
+            element={
+              <AlertsSection
+                alerts={alerts}
+                hasLiveEvents={flows.length > 0}
+                onAction={applyActionToAlert}
+                actionBusy={actionBusy}
+              />
+            }
+          />
+          <Route
+            path="sim-lab"
+            element={
+              <ScenariosSection
+                modeStatus={modeStatus}
+                scenarios={scenarios}
+                scenarioDraft={scenarioDraft}
+                setScenarioDraft={setScenarioDraft}
+                actionBusy={actionBusy}
+                runScenario={runScenario}
+                clearScenarioEvents={clearScenarioEvents}
+              />
+            }
+          />
+          <Route
+            path="response-studio"
+            element={
+              <MitigationSection
+                mitigationDraft={mitigationDraft}
+                mitigationConfig={mitigationConfig}
+                setMitigationDraft={setMitigationDraft}
+                setMitigationDraftDirty={setMitigationDraftDirty}
+                onAutoMitigationToggle={toggleAutoMitigation}
+                saveMitigationConfig={saveMitigationConfig}
+                manualAction={manualAction}
+                setManualAction={setManualAction}
+                submitManualMitigationFromPanel={submitManualMitigationFromPanel}
+                activeMitigations={activeMitigations}
+                rollbackMitigation={rollbackMitigation}
+                mitigationEvents={mitigationEvents}
+                actionBusy={actionBusy}
+              />
+            }
+          />
+          <Route path="runtime" element={<HealthSection healthCards={healthCards} controllerStatus={controllerStatus} />} />
+          <Route path="*" element={<Navigate to="mission" replace />} />
+        </Routes>
       </section>
 
-      {error && <div className="error-banner">API error: {error}</div>}
-      {actionMessage && <div className="action-banner">{actionMessage}</div>}
-
-      <nav className="dashboard-nav" aria-label="Dashboard sections">
-        {NAV_ITEMS.map((item) => (
-          <NavLink key={item.to} to={item.to} className={({ isActive }) => `nav-pill ${isActive ? 'active' : ''}`}>
-            {item.label}
-          </NavLink>
-        ))}
-      </nav>
-
-      <Routes>
-        <Route path="/" element={<Navigate to="overview" replace />} />
-        <Route path="overview" element={<OverviewSection stats={stats} chartRows={chartRows} />} />
-        <Route path="topology" element={<TopologySection topology={topology} graphLayout={graphLayout} />} />
-        <Route path="raw-flows" element={<RawFlowsSection flows={flows} />} />
-        <Route
-          path="sessions"
-          element={<SessionsSection sessions={sessions} onAction={applyActionToSession} actionBusy={actionBusy} />}
-        />
-        <Route
-          path="alerts"
-          element={
-            <AlertsSection
-              alerts={alerts}
-              hasLiveEvents={flows.length > 0}
-              onAction={applyActionToAlert}
-              actionBusy={actionBusy}
-            />
-          }
-        />
-        <Route
-          path="scenarios"
-          element={
-            <ScenariosSection
-              modeStatus={modeStatus}
-              scenarios={scenarios}
-              scenarioDraft={scenarioDraft}
-              setScenarioDraft={setScenarioDraft}
-              actionBusy={actionBusy}
-              runScenario={runScenario}
-              clearScenarioEvents={clearScenarioEvents}
-            />
-          }
-        />
-        <Route
-          path="mitigation"
-          element={
-            <MitigationSection
-              mitigationDraft={mitigationDraft}
-              mitigationConfig={mitigationConfig}
-              setMitigationDraft={setMitigationDraft}
-              setMitigationDraftDirty={setMitigationDraftDirty}
-              onAutoMitigationToggle={toggleAutoMitigation}
-              saveMitigationConfig={saveMitigationConfig}
-              manualAction={manualAction}
-              setManualAction={setManualAction}
-              submitManualMitigationFromPanel={submitManualMitigationFromPanel}
-              activeMitigations={activeMitigations}
-              rollbackMitigation={rollbackMitigation}
-              mitigationEvents={mitigationEvents}
-              actionBusy={actionBusy}
-            />
-          }
-        />
-        <Route path="health" element={<HealthSection healthCards={healthCards} controllerStatus={controllerStatus} />} />
-        <Route path="*" element={<Navigate to="overview" replace />} />
-      </Routes>
+      <aside className="workspace-activity">
+        <section className="panel">
+          <h2>Live Activity Feed</h2>
+          <ul className="workspace-feed-list">
+            {alerts.slice(0, 5).map((alert) => (
+              <li key={alertItemKey(alert)}>
+                <strong>{alert.prediction}</strong>
+                <span>{alert.src_ip} → {alert.dst_ip}</span>
+                <small>{formatTimestamp(alert.timestamp)}</small>
+              </li>
+            ))}
+            {alerts.length === 0 && <li className="empty-message">No active alerts in queue.</li>}
+          </ul>
+        </section>
+        <section className="panel">
+          <h2>Active Responses</h2>
+          <ul className="workspace-feed-list">
+            {activeMitigations.slice(0, 5).map((event) => (
+              <li key={event.mitigation_id}>
+                <strong>{event.action}</strong>
+                <span>{event.target_summary}</span>
+                <small>{event.enforcement_status}</small>
+              </li>
+            ))}
+            {activeMitigations.length === 0 && <li className="empty-message">No active mitigations.</li>}
+          </ul>
+        </section>
+      </aside>
     </main>
   )
 }
@@ -1728,7 +1873,7 @@ function App() {
         user: response.user,
         error: '',
       })
-      navigate('/dashboard/overview', { replace: true })
+      navigate('/workspace/mission', { replace: true })
     } catch (loginError) {
       setSession({
         status: 'unauthenticated',
@@ -1770,14 +1915,14 @@ function App() {
         path="/login"
         element={
           session.status === 'authenticated' ? (
-            <Navigate to="/dashboard/overview" replace />
+            <Navigate to="/workspace/mission" replace />
           ) : (
             <LoginGate onLogin={handleLogin} loading={loginBusy} backendError={session.error} />
           )
         }
       />
       <Route
-        path="/dashboard/*"
+        path="/workspace/*"
         element={
           <ProtectedRoute authenticated={session.status === 'authenticated'}>
             <SocDashboard
@@ -1792,7 +1937,7 @@ function App() {
       <Route
         path="*"
         element={
-          <Navigate to={session.status === 'authenticated' ? '/dashboard/overview' : '/login'} replace />
+          <Navigate to={session.status === 'authenticated' ? '/workspace/mission' : '/login'} replace />
         }
       />
     </Routes>
