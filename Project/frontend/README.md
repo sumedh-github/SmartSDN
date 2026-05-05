@@ -1,37 +1,41 @@
 # IDS Frontend (React + Vite)
 
-This frontend renders a modern SOC-style SDN security dashboard backed by the FastAPI service.
+React frontend for the SDN SOC dashboard with real backend authentication and protected routes.
 
 ## Features
 
-- Modern UI login gate (demo/local UI-only access)
-- SOC dashboard theme with health/status cards
-- Dynamic topology graph from backend/controller data (`/topology`)
-- Live controller visibility panel (`/controller/status`)
-- Explicit mode indicator and switch:
+- Login page backed by real backend auth (`POST /auth/login`)
+- Token session persistence in `localStorage`
+- Protected dashboard routes with redirect to `/login` on invalid session
+- Multi-section SOC navigation:
+  - Overview Dashboard
+  - Topology
+  - Raw Flows
+  - Sessions
+  - Alerts
+  - Scenarios
+  - Mitigation
+  - System / Controller Health
+  - Methodology / About
+- Dynamic backend-driven topology graph (`GET /topology`)
+- Explicit mode indicator:
   - REAL ML MODE
   - DEMO / SCENARIO MODE
-- Scenario runner controls (`/scenarios`, `/scenarios/run`, `/scenarios/clear`)
-- Raw directional live flow table (`/flows`)
-- Grouped session/conversation cards (`/sessions`)
-- Mitigation panel:
-  - Manual actions (`/mitigate`)
-  - Automatic mitigation configuration (`/mitigation/config`)
-  - Mitigation event log (`/mitigation/events`)
-- Label source visibility on events and sessions:
-  - ML
-  - Demo
-  - Hybrid
+- Scenario runner with host-target controls (`POST /scenarios/run`)
+- Session-first operations and mitigation controls with rollback
+- Source badges and explainability:
+  - Label source: ML / Demo / Hybrid
+  - Mitigation source: Manual / Automatic
 
 ## Configuration
 
-Set the backend base URL with:
+Set backend API base URL:
 
 ```bash
 VITE_API_BASE_URL=http://localhost:8000
 ```
 
-If omitted, the app defaults to `http://localhost:8000`.
+Default is `http://localhost:8000`.
 
 ## Run
 
@@ -40,8 +44,15 @@ npm install
 npm run dev
 ```
 
+## Build / lint
+
+```bash
+npm run lint
+npm run build
+```
+
 ## Notes
 
-- No historical persistence is used; all dashboard state is live and in-memory.
-- Demo/scenario controls are available only when DEMO / SCENARIO MODE is active.
-- REAL ML MODE uses live controller FT-Transformer labels only.
+- All runtime dashboard state remains live/in-memory (no DB history).
+- Demo/scenario controls are available only in DEMO / SCENARIO MODE.
+- REAL ML MODE displays live controller FT-Transformer labels only.

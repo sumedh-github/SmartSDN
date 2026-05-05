@@ -1,84 +1,106 @@
 import { useState } from 'react'
 
-function LoginGate({ onSuccess }) {
+function LoginGate({ onLogin, loading, backendError }) {
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
+  const [validationError, setValidationError] = useState('')
 
   const handleSubmit = async (event) => {
     event.preventDefault()
-    setError('')
+    setValidationError('')
 
     const trimmed = identifier.trim()
     if (!trimmed) {
-      setError('Username or email is required.')
+      setValidationError('Username or email is required.')
       return
     }
     if (!password.trim()) {
-      setError('Password is required.')
+      setValidationError('Password is required.')
       return
     }
     if (password.length < 4) {
-      setError('Password must be at least 4 characters.')
+      setValidationError('Password must be at least 4 characters.')
       return
     }
 
-    setLoading(true)
-    await new Promise((resolve) => {
-      window.setTimeout(resolve, 650)
-    })
-    setLoading(false)
-    onSuccess(trimmed)
+    onLogin({ identifier: trimmed, password })
   }
 
   return (
     <main className="login-shell">
-      <section className="login-card">
-        <div className="login-badge">SDN SOC SECURITY PLATFORM</div>
-        <h1>Sign in to Live Dashboard</h1>
-        <p>UI access gate for local demo sessions. Real authentication is not enabled.</p>
-        <form className="login-form" onSubmit={handleSubmit}>
-          <label htmlFor="login-identifier">Username or email</label>
-          <input
-            id="login-identifier"
-            name="identifier"
-            placeholder="soc.demo@local"
-            autoComplete="username"
-            value={identifier}
-            onChange={(event) => setIdentifier(event.target.value)}
-            disabled={loading}
-          />
+      <section className="login-layout">
+        <aside className="login-hero">
+          <h1>AI-SDN</h1>
+          <p className="muted">
+            Observe live controller telemetry, investigate suspicious sessions, and orchestrate mitigation from a
+            single operator console.
+          </p>
+          <ul className="login-capability-list">
+            <li>
+              <strong>Live topology intelligence</strong>
+              <span>Controller, switch, and host visibility with stateful traffic overlays.</span>
+            </li>
+            <li>
+              <strong>Explainable threat response</strong>
+              <span>Operator-driven and automatic mitigations with enforcement detail trails.</span>
+            </li>
+            <li>
+              <strong>Scenario simulation lab</strong>
+              <span>Controlled replay for demonstrations, testing, and SOC training flow.</span>
+            </li>
+          </ul>
+        </aside>
 
-          <label htmlFor="login-password">Password</label>
-          <div className="password-row">
+        <section className="login-card">
+          <div className="login-badge">SECURE OPERATOR ACCESS</div>
+          <h1>Sign in</h1>
+          <p>Authenticate with the configured admin identity to open the workspace.</p>
+          <form className="login-form" onSubmit={handleSubmit}>
+            <label htmlFor="login-identifier">Username or email</label>
             <input
-              id="login-password"
-              name="password"
-              placeholder="Enter password"
-              type={showPassword ? 'text' : 'password'}
-              autoComplete="current-password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
+              id="login-identifier"
+              name="identifier"
+              placeholder="soc.demo@local"
+              autoComplete="username"
+              value={identifier}
+              onChange={(event) => setIdentifier(event.target.value)}
               disabled={loading}
             />
-            <button
-              className="btn ghost tiny"
-              type="button"
-              onClick={() => setShowPassword((value) => !value)}
-              disabled={loading}
-            >
-              {showPassword ? 'Hide' : 'Show'}
+
+            <label htmlFor="login-password">Password</label>
+            <div className="password-row">
+              <input
+                id="login-password"
+                name="password"
+                placeholder="Enter password"
+                type={showPassword ? 'text' : 'password'}
+                autoComplete="current-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                disabled={loading}
+              />
+              <button
+                className="btn ghost tiny"
+                type="button"
+                onClick={() => setShowPassword((value) => !value)}
+                disabled={loading}
+              >
+                {showPassword ? 'Hide' : 'Show'}
+              </button>
+            </div>
+
+            {validationError || backendError ? (
+              <div className="form-error">{validationError || backendError}</div>
+            ) : (
+              <div className="form-hint">Credentials are validated by backend /auth/login.</div>
+            )}
+
+            <button className="btn primary login-btn" type="submit" disabled={loading}>
+              {loading ? 'Signing in...' : 'Enter workspace'}
             </button>
-          </div>
-
-          {error ? <div className="form-error">{error}</div> : <div className="form-hint">Demo-only login gate.</div>}
-
-          <button className="btn primary login-btn" type="submit" disabled={loading}>
-            {loading ? 'Signing in...' : 'Login'}
-          </button>
-        </form>
+          </form>
+        </section>
       </section>
     </main>
   )
