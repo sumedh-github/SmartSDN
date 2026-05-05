@@ -945,15 +945,74 @@ th {
   min-height: 100vh;
   display: grid;
   place-items: center;
+  padding: 1rem;
+}
+
+.login-layout {
+  width: min(980px, 96vw);
+  border-radius: 20px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  background: linear-gradient(160deg, rgba(8, 15, 35, 0.92), rgba(8, 15, 35, 0.78));
+  box-shadow: var(--shadow-soft);
+  display: grid;
+  grid-template-columns: 1fr minmax(360px, 420px);
+}
+
+.login-hero {
+  padding: 1.5rem;
+  background:
+    radial-gradient(circle at 10% 0%, rgba(34, 197, 94, 0.16), transparent 45%),
+    radial-gradient(circle at 90% 0%, rgba(245, 158, 11, 0.14), transparent 45%),
+    linear-gradient(175deg, rgba(2, 6, 23, 0.94), rgba(15, 23, 42, 0.78));
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.login-kicker {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  font-size: 0.74rem;
+  color: color-mix(in srgb, var(--accent-secondary) 35%, white);
+}
+
+.login-hero h1 {
+  margin: 0;
+  font-size: 1.85rem;
+  line-height: 1.18;
+  color: var(--text-primary);
+}
+
+.login-hero .muted {
+  color: var(--text-secondary);
+}
+
+.login-capability-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.login-capability-list li {
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  padding: 0.55rem 0.6rem;
+  background: rgba(15, 23, 42, 0.45);
+  color: var(--text-secondary);
+  font-size: 0.83rem;
 }
 
 .login-card {
-  width: min(430px, 94vw);
-  border-radius: 14px;
-  border: 1px solid var(--border-strong);
-  background: rgba(15, 23, 42, 0.88);
-  padding: 1.1rem;
-  box-shadow: var(--shadow-soft);
+  padding: 1.35rem 1.2rem;
+  background: rgba(15, 23, 42, 0.84);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 .login-badge {
@@ -965,6 +1024,7 @@ th {
 
 .login-card h1 {
   margin: 0;
+  font-size: 1.35rem;
 }
 
 .login-card p {
@@ -1019,6 +1079,14 @@ th {
 }
 
 @media (max-width: 1100px) {
+  .login-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .login-hero {
+    display: none;
+  }
+
   .workspace-shell {
     grid-template-columns: 240px minmax(0, 1fr);
   }
@@ -1054,6 +1122,14 @@ th {
 }
 
 @media (max-width: 760px) {
+  .login-shell {
+    padding: 0.6rem;
+  }
+
+  .login-card {
+    padding: 1rem 0.9rem;
+  }
+
   .soc-shell {
     padding: 0.65rem;
   }
