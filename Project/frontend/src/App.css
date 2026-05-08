@@ -4,6 +4,12 @@
   gap: 1rem;
 }
 
+.section-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
 .soc-header {
   display: flex;
   justify-content: space-between;
@@ -61,6 +67,28 @@
 .mode-buttons {
   display: flex;
   gap: 0.5rem;
+}
+
+.dashboard-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.nav-pill {
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 999px;
+  padding: 0.35rem 0.7rem;
+  text-decoration: none;
+  font-size: 0.82rem;
+  color: #cbd5e1;
+  background: rgba(15, 23, 42, 0.62);
+}
+
+.nav-pill.active {
+  border-color: rgba(59, 130, 246, 0.7);
+  color: #bfdbfe;
+  background: rgba(30, 64, 175, 0.3);
 }
 
 .summary-grid {
@@ -307,6 +335,26 @@
   color: #fca5a5;
 }
 
+.legend-item.disabled {
+  border-color: rgba(148, 163, 184, 0.5);
+  color: #cbd5e1;
+}
+
+.legend-item.controller {
+  border-color: rgba(147, 197, 253, 0.5);
+  color: #dbeafe;
+}
+
+.legend-item.switch {
+  border-color: rgba(96, 165, 250, 0.5);
+  color: #bfdbfe;
+}
+
+.legend-item.host {
+  border-color: rgba(148, 163, 184, 0.5);
+  color: #e2e8f0;
+}
+
 .bar-chart {
   display: flex;
   flex-direction: column;
@@ -463,6 +511,16 @@ th {
   font-size: 0.84rem;
 }
 
+.checkbox-row {
+  justify-content: space-between;
+  flex-direction: row !important;
+  align-items: center;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  background: rgba(15, 23, 42, 0.92);
+}
+
 .scenario-controls input,
 .mitigation-config input,
 .mitigation-config select,
@@ -508,6 +566,49 @@ th {
 
 .mitigation-config > button {
   grid-column: 1 / -1;
+}
+
+.toggle-row {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  background: rgba(15, 23, 42, 0.92);
+}
+
+.toggle-switch {
+  position: relative;
+  width: 48px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(51, 65, 85, 0.9);
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.toggle-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  transition: transform 0.2s ease;
+}
+
+.toggle-switch.on {
+  background: rgba(34, 197, 94, 0.3);
+  border-color: rgba(34, 197, 94, 0.6);
+}
+
+.toggle-switch.on::after {
+  transform: translateX(22px);
 }
 
 .manual-mitigation-form {

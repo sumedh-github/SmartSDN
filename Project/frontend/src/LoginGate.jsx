@@ -1,44 +1,38 @@
 import { useState } from 'react'
 
-function LoginGate({ onSuccess }) {
+function LoginGate({ onLogin, loading, backendError }) {
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
+  const [validationError, setValidationError] = useState('')
 
   const handleSubmit = async (event) => {
     event.preventDefault()
-    setError('')
+    setValidationError('')
 
     const trimmed = identifier.trim()
     if (!trimmed) {
-      setError('Username or email is required.')
+      setValidationError('Username or email is required.')
       return
     }
     if (!password.trim()) {
-      setError('Password is required.')
+      setValidationError('Password is required.')
       return
     }
     if (password.length < 4) {
-      setError('Password must be at least 4 characters.')
+      setValidationError('Password must be at least 4 characters.')
       return
     }
 
-    setLoading(true)
-    await new Promise((resolve) => {
-      window.setTimeout(resolve, 650)
-    })
-    setLoading(false)
-    onSuccess(trimmed)
+    onLogin({ identifier: trimmed, password })
   }
 
   return (
     <main className="login-shell">
       <section className="login-card">
-        <div className="login-badge">SDN SOC SECURITY PLATFORM</div>
+        <div className="login-badge">SMARTSDN</div>
         <h1>Sign in to Live Dashboard</h1>
-        <p>UI access gate for local demo sessions. Real authentication is not enabled.</p>
+        <p>Single-admin local authentication backed by secure token session.</p>
         <form className="login-form" onSubmit={handleSubmit}>
           <label htmlFor="login-identifier">Username or email</label>
           <input
@@ -73,7 +67,11 @@ function LoginGate({ onSuccess }) {
             </button>
           </div>
 
-          {error ? <div className="form-error">{error}</div> : <div className="form-hint">Demo-only login gate.</div>}
+          {validationError || backendError ? (
+            <div className="form-error">{validationError || backendError}</div>
+          ) : (
+            <div className="form-hint">Credentials are validated by backend /auth/login.</div>
+          )}
 
           <button className="btn primary login-btn" type="submit" disabled={loading}>
             {loading ? 'Signing in...' : 'Login'}
