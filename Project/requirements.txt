@@ -7,3 +7,5 @@ ryu
 matplotlib
 seaborn
 tqdm
+fastapi
+uvicorn
