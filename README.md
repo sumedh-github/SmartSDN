@@ -1,4 +1,4 @@
-# Intelligent SDN Cyber/SOC Platform with FT-Transformer IDS
+# Intelligent SDN Cyber/SOC Platform with GNN IDS
 
 This repository contains a Linux/Kali-compatible research/demo SDN security platform with:
 - **Ryu controller** (OpenFlow 1.3 learning switch + live FT-Transformer inference)
